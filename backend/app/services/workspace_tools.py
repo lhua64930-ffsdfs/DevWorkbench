@@ -61,6 +61,13 @@ def _checkout_root() -> Path:
 
 
 def _repo_checkout_path(repo: Repository) -> Path:
+    if settings.app_env.lower() == "production":
+        from app.services.code_analysis import _repo_checkout_path as expected_path, _stored_checkout_path
+        expected = expected_path(repo).resolve()
+        stored = _stored_checkout_path(repo)
+        if getattr(repo, "checkout_mode", None) == "local" or (stored is not None and stored != expected) or not expected.is_relative_to(_checkout_root()):
+            raise ValueError("生产环境只允许当前仓库的托管工作区")
+        return expected
     local_path = getattr(repo, "local_path", None)
     if local_path:
         path = Path(os.path.expandvars(os.path.expanduser(str(local_path))))
@@ -91,6 +98,8 @@ def _repo_checkout_path(repo: Repository) -> Path:
 
 def _workspace_root(repo: Repository | None) -> Path:
     if repo is None:
+        if settings.app_env.lower() == "production":
+            raise ValueError("生产环境读取源码必须指定仓库")
         return PROJECT_ROOT
     checkout_path = _repo_checkout_path(repo)
     if not checkout_path.exists():
@@ -137,7 +146,7 @@ def _iter_workspace_files(root: Path, workspace_root: Path, max_files: int = 100
     for path in root.rglob("*"):
         if count >= max_files:
             break
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(workspace_root):
             continue
         relative_parts = path.relative_to(workspace_root).parts
         if any(part in WORKSPACE_SKIP_DIRS for part in relative_parts):

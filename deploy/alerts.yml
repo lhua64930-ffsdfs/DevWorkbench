@@ -1,0 +1,23 @@
+groups:
+  - name: codepilot
+    rules:
+      - alert: CodePilotAPIUnavailable
+        expr: up{job="codepilot"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: 'DevWorkbench metrics unavailable: check API, TLS and monitor token expiry'}
+      - alert: CodePilotWorkersUnavailable
+        expr: codepilot_workers_alive < 1
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: 'No DevWorkbench worker heartbeat'}
+      - alert: CodePilotQueueStalled
+        expr: codepilot_oldest_queued_job_seconds > 300
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: 'DevWorkbench queue has jobs waiting more than five minutes'}
+      - alert: CodePilotHTTPServerErrors
+        expr: sum(rate(codepilot_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(codepilot_http_requests_total[5m])), 0.01) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: 'DevWorkbench HTTP server error ratio above five percent'}

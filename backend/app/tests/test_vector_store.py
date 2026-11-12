@@ -1,5 +1,7 @@
+import json
 import uuid
 
+import httpx
 import pytest
 
 from app.core.config import settings
@@ -60,6 +62,31 @@ def test_embedding_provider_failure_is_not_replaced_with_hash_vectors(monkeypatc
             model="configured-model",
             dimensions=8,
         )
+
+
+def test_dashscope_embedding_batches_follow_provider_limit_and_keep_input_order(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "embedding_provider", "dashscope")
+    monkeypatch.setattr(settings, "embedding_model", "text-embedding-v4")
+    monkeypatch.setattr(settings, "embedding_dimensions", 1024)
+    monkeypatch.setattr(settings, "dashscope_api_key", "unit-test-key")
+    batch_sizes = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        inputs = json.loads(request.content)["input"]
+        batch_sizes.append(len(inputs))
+        rows = [
+            {"index": index, "embedding": [float(value)] + [0.0] * 1023}
+            for index, value in enumerate(inputs)
+        ]
+        return httpx.Response(200, json={"data": list(reversed(rows))})
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr("app.services.rag.embeddings.httpx.Client", lambda **kwargs: client)
+    vectors = embed_knowledge_texts(
+        [str(i) for i in range(23)], provider="dashscope", model="text-embedding-v4", dimensions=1024,
+    )
+    assert batch_sizes == [10, 10, 3]
+    assert [vector[0] for vector in vectors] == list(range(23))
 
 
 def test_milvus_upsert_rejects_dimension_fitting_before_connecting(monkeypatch) -> None:

@@ -56,6 +56,9 @@ def test_database_error_classification(sqlstate, hint):
 @pytest.mark.asyncio
 async def test_readiness_http_status_matches_actual_database(database, monkeypatch):
     import app.main as main
+    # This test isolates database/schema readiness; vector dependency failures
+    # have their own probe tests and must not depend on a developer's .env.
+    monkeypatch.setattr(main.settings, "milvus_enabled", False)
     monkeypatch.setattr(main, "engine", database)
     app = main.create_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:

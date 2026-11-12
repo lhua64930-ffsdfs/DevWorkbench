@@ -1,9 +1,10 @@
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 
 def _derive_demo_key(secret: str) -> bytes:
     # Fernet 需要 urlsafe base64 编码的 32 字节密钥。
-    # 这里的确定性本地开发派生方式适合课程项目，不适合生产环境。
+    # Production supplies a cryptographically random, independent secret. This
+    # SHA-256 adapter preserves ciphertext compatibility; it is not a password KDF.
     import base64
     import hashlib
 
@@ -15,7 +16,9 @@ def encrypt_token(token: str, secret: str) -> str:
 
 
 def decrypt_token(encrypted: str, secret: str) -> str | None:
+    from app.core.config import settings
+    keys = [secret, *[key.strip() for key in settings.token_encryption_previous_keys.split(",") if key.strip()]]
     try:
-        return Fernet(_derive_demo_key(secret)).decrypt(encrypted.encode("utf-8")).decode("utf-8")
+        return MultiFernet([Fernet(_derive_demo_key(key)) for key in keys]).decrypt(encrypted.encode("utf-8")).decode("utf-8")
     except InvalidToken:
         return None

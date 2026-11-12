@@ -15,6 +15,8 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(200), default="demo-user")
     role: Mapped[str] = mapped_column(String(80), default="owner", index=True)
     api_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disabled: Mapped[bool] = mapped_column(default=False, server_default="false")
     github_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -44,6 +46,20 @@ class Repository(Base):
     issues: Mapped[list["Issue"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
     pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
     workflow_runs: Mapped[list["WorkflowRun"]] = relationship(back_populates="repo", cascade="all, delete-orphan")
+
+
+class ResourceLease(Base):
+    __tablename__ = "resource_leases"
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class RequestQuota(Base):
+    __tablename__ = "request_quotas"
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    bucket: Mapped[int] = mapped_column(BigInteger)
+    count: Mapped[int] = mapped_column(Integer)
 
 
 class BackgroundJob(Base):

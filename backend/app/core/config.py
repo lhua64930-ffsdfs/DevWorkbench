@@ -4,21 +4,41 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_env: str = "development"
-    app_name: str = "CodePilot"
+    app_name: str = "DevWorkbench"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    background_execution_mode: str = "embedded"
+    worker_kinds: str = ""
+    worker_concurrency: int = Field(default=2, ge=1, le=16)
+    job_timeout_seconds: int = Field(default=1800, ge=10, le=7200)
+    worker_poll_seconds: float = Field(default=2, ge=0.1, le=60)
+    token_ttl_days: int = Field(default=30, ge=1, le=90)
+    outbound_allowed_hosts: str = "api.github.com,github.com,codeload.github.com,api.deepseek.com,dashscope.aliyuncs.com"
+    request_max_bytes: int = Field(default=14 * 1024 * 1024, ge=1024)
+    requests_per_minute: int = Field(default=120, ge=1)
+    ai_requests_per_hour: int = Field(default=60, ge=1)
+    ai_global_requests_per_hour: int = Field(default=300, ge=1)
+    max_document_chunks: int = Field(default=500, ge=1, le=5000)
+    max_eval_cases: int = Field(default=20, ge=1, le=100)
+    ai_concurrent_requests: int = Field(default=2, ge=1, le=32)
+    request_timeout_seconds: int = Field(default=600, ge=10, le=3600)
+    token_encryption_previous_keys: str = ""
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
 
     database_url: str = "postgresql+psycopg://devflow:devflow@localhost:5432/devflow"
     database_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    database_pool_size: int = Field(default=10, ge=1, le=100)
+    database_max_overflow: int = Field(default=10, ge=0, le=100)
+    database_pool_timeout: int = Field(default=5, ge=1, le=60)
 
     github_token: str | None = None
     github_api_base_url: str = "https://api.github.com"
 
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.deepseek.com"
-    llm_model: str = "deepseek-v4-pro"
+    llm_model: str = "deepseek-flash"
     rag_llm_enabled: bool = True
+    grounded_answers_enabled: bool = True
     embedding_provider: str = "qwen_local"
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimensions: int = 1024
@@ -45,7 +65,7 @@ class Settings(BaseSettings):
     ragas_judge_model: str | None = None
     ragas_timeout_seconds: float = 120.0
     ragas_judge_max_tokens: int = 8192
-    ragas_answer_relevancy_strictness: int = 1
+    ragas_answer_relevancy_strictness: int = 3
     ragas_max_cases: int = 5
     ragas_context_precision_min: float = 0.75
     ragas_context_recall_min: float = 0.80
@@ -55,7 +75,7 @@ class Settings(BaseSettings):
     ragas_tool_call_accuracy_min: float = 0.90
     ragas_tool_call_f1_min: float = 0.90
     context_max_input_tokens: int = 24000
-    context_reserved_response_tokens: int = 3000
+    context_reserved_response_tokens: int = Field(default=3000, ge=128, le=16384)
     context_dynamic_model_window_enabled: bool = True
     context_model_window_tokens: int | None = None
     context_compact_reserved_output_tokens: int = 12000

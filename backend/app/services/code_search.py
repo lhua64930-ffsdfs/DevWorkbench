@@ -110,6 +110,10 @@ _STOP_TERMS = {
 
 
 def repository_checkout_path(repo: Repository) -> Path:
+    from app.core.config import settings
+    if settings.app_env.lower() == "production":
+        from app.services.workspace_tools import _repo_checkout_path
+        return _repo_checkout_path(repo)
     raw_path = str(getattr(repo, "local_path", None) or "").strip()
     if raw_path:
         path = Path(raw_path).expanduser()

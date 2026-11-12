@@ -26,7 +26,7 @@ class EvalRunRequest(BaseModel):
     run_judge: bool = True
     top_k: int = Field(default=5, ge=1, le=20)
     suite_id: str | None = None
-    cases: list[RagEvalCaseRequest] | None = None
+    cases: list[RagEvalCaseRequest] | None = Field(default=None, max_length=100)
 
 
 class EvalIssueDraftRequest(BaseModel):

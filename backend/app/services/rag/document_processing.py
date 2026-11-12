@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from app.core.config import settings
 
 from app.db.models import KnowledgeSourceDocument
 from app.db.session import SessionLocal
@@ -79,6 +80,8 @@ def process_knowledge_document(document_id: uuid.UUID) -> None:
         )
         if not chunks:
             raise ValueError("文档切分后没有有效片段")
+        if len(chunks) > settings.max_document_chunks:
+            raise ValueError("文档分块数量超限，请拆分后上传")
 
         source.status = "embedding"
         source.chunk_count = len(chunks)

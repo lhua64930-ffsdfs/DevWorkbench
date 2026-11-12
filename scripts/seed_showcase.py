@@ -37,7 +37,7 @@ def main():
             print("Showcase fixtures already exist")
             return
         now = datetime.now(timezone.utc)
-        repo = Repository(owner="showcase", name="codepilot-demo", full_name="showcase/codepilot-demo", description="CodePilot 产品展示 · 合成演示数据", provider="github", default_branch="main", sync_status="completed", last_sync_at=now)
+        repo = Repository(owner="showcase", name="codepilot-demo", full_name="showcase/codepilot-demo", description="DevWorkbench 产品展示 · 合成演示数据", provider="github", default_branch="main", sync_status="completed", last_sync_at=now)
         db.add(repo)
         db.flush()
         db.add_all([

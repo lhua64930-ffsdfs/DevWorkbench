@@ -19,14 +19,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: backend/requirements-production.lock
       - run: >-
-          python -m pip install --only-binary=:all: --index-url https://pypi.org/simple -r requirements.txt
+          python -m pip install --only-binary=:all: --require-hashes --index-url https://pypi.org/simple -r requirements-production.lock
         working-directory: backend
       - run: python -m security_patches --apply
         working-directory: backend
+      - run: python scripts/check_sources.py
       - run: python -m alembic upgrade head
         working-directory: backend
       - run: python -m pytest app/tests -q
@@ -55,3 +56,30 @@ jobs:
       - run: npm run test:lint-compat
       - run: npm run lint -- --max-warnings 0
       - run: npm run build
+  postgres-acceptance:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: codepilot_ci
+          POSTGRES_PASSWORD: ephemeral_ci_only
+          POSTGRES_DB: codepilot_ci_validation
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U codepilot_ci -d codepilot_ci_validation"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgresql+psycopg://codepilot_ci:ephemeral_ci_only@127.0.0.1:5432/codepilot_ci_validation
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --only-binary=:all: --require-hashes --index-url https://pypi.org/simple -r requirements-production.lock
+        working-directory: backend
+      - run: python -m security_patches --apply
+        working-directory: backend
+      - run: python scripts/verify_enterprise.py --allow-isolated-database --output .data/ci-acceptance.json

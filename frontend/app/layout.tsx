@@ -4,7 +4,7 @@ import { AppShell } from "@/components/layout/app-shell";
 import { AuthGate } from "@/components/auth-gate";
 
 export const metadata: Metadata = {
-  title: "CodePilot",
+  title: "DevWorkbench",
   description: "PR / Issue intelligent collaboration agent for engineering teams"
 };
 

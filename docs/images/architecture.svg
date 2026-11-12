@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="830" viewBox="0 0 1440 830" role="img" aria-labelledby="title desc">
-  <title id="title">CodePilot 系统架构</title><desc id="desc">Next.js 交互层经身份和仓库权限连接 FastAPI。ChatAgent 编排专项 Agent、RAG、工作区和记忆工具，使用 PostgreSQL、Milvus、GitHub 与模型服务；后台任务持久化，外部写入经人工确认。</desc>
+  <title id="title">DevWorkbench 系统架构</title><desc id="desc">Next.js 交互层经身份和仓库权限连接 FastAPI。ChatAgent 编排专项 Agent、RAG、工作区和记忆工具，使用 PostgreSQL、Milvus、GitHub 与模型服务；后台任务持久化，外部写入经人工确认。</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10" fill="none" stroke="#6b8a91" stroke-width="1.5"/></marker></defs>
   <rect width="1440" height="830" rx="20" fill="#f5f8fa"/>
   <g font-family="Segoe UI,Microsoft YaHei,Arial,sans-serif">
-    <text x="48" y="57" fill="#153d47" font-size="28" font-weight="700">CodePilot / 系统架构</text><text x="48" y="88" fill="#68828a" font-size="16">交互层 · 访问边界 · 智能分析 · 工程数据与后台任务</text>
+    <text x="48" y="57" fill="#153d47" font-size="28" font-weight="700">DevWorkbench / 系统架构</text><text x="48" y="88" fill="#68828a" font-size="16">交互层 · 访问边界 · 智能分析 · 工程数据与后台任务</text>
     <g stroke="#6b8a91" stroke-width="2" fill="none" marker-end="url(#arrow)">
       <path d="M720 191v29"/><path d="M720 302v30"/><path d="M720 427v17H202v17"/><path d="M720 444H527v17"/><path d="M720 444H852v17"/><path d="M720 444H1207v17"/><path d="M202 550v38"/><path d="M527 550v38"/><path d="M852 550v38"/><path d="M1207 550v38"/>
     </g>

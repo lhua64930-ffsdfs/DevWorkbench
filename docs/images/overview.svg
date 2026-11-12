@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="470" viewBox="0 0 1440 470" role="img" aria-labelledby="title desc">
-  <title id="title">CodePilot — AI 研发协作平台</title>
+  <title id="title">DevWorkbench — AI 研发协作平台</title>
   <desc id="desc">连接 Issue、PR、CI 和项目知识，通过多智能体分析、证据检索与人工审批辅助研发决策。</desc>
   <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#092f39"/><stop offset="1" stop-color="#0c5b59"/></linearGradient></defs>
   <rect width="1440" height="470" rx="24" fill="url(#bg)"/>
   <g font-family="Segoe UI,Microsoft YaHei,Arial,sans-serif">
     <text x="64" y="64" fill="#9ce6d6" font-size="16" letter-spacing="3">ENGINEERING CONTEXT → ACTIONABLE DECISIONS</text>
-    <text x="60" y="150" fill="white" font-size="72" font-weight="700">CodePilot</text>
+    <text x="60" y="150" fill="white" font-size="72" font-weight="700">DevWorkbench</text>
     <text x="64" y="204" fill="#e3f7f2" font-size="31" font-weight="600">AI 研发协作平台</text>
     <text x="64" y="257" fill="#b8d7d3" font-size="21">让研发问题有上下文，让分析结论有依据。</text>
     <g font-size="17" fill="#dcf5ee">

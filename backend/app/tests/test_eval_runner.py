@@ -396,22 +396,23 @@ async def test_rag_quality_eval_runs_real_chatagent_and_rolls_back_eval_conversa
     db.commit()
     scorer = RecordingScorer()
     progress_events = []
+    saved_rows = {}
+    case = RagEvalCase(
+        id="retry-policy",
+        question="How should authentication retries work?",
+        reference="Use an idempotency key and retry only once.",
+        expected_source_ids=[str(document.id), str(source_id)],
+        source_type="project_doc",
+    )
 
     result = await run_rag_quality_eval(
         db,
         str(repo.id),
-        cases=[
-            RagEvalCase(
-                id="retry-policy",
-                question="How should authentication retries work?",
-                reference="Use an idempotency key and retry only once.",
-                expected_source_ids=[str(document.id), str(source_id)],
-                source_type="project_doc",
-            )
-        ],
+        cases=[case],
         scorer=scorer,
         agent_factory=lambda: ChatAgent(model=EvalAnswerModel()),  # type: ignore[arg-type]
         progress_callback=lambda event: progress_events.append(event),
+        case_callback=lambda row: saved_rows.update({row["id"]: row}),
     )
 
     assert result["kind"] == "chatagent_ragas"
@@ -431,6 +432,10 @@ async def test_rag_quality_eval_runs_real_chatagent_and_rolls_back_eval_conversa
         "finalizing",
     ]
     assert db.query(Conversation).filter(Conversation.status == "evaluation").count() == 0
+    resumed = await run_rag_quality_eval(db, str(repo.id), cases=[case], scorer=scorer, resume_rows=saved_rows)
+    assert len(scorer.calls) == 1
+    assert resumed["summary_metrics"] == result["summary_metrics"]
+    assert resumed["cases"] == result["cases"]
 
 
 @pytest.mark.asyncio

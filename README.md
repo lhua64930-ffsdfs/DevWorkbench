@@ -1,18 +1,18 @@
 <div align="center">
 
-# CodePilot — AI 研发协作平台
+# DevWorkbench — AI 研发协作平台
 
 **连接 Issue、PR、CI 与项目知识，让研发分析有上下文、有依据、有执行边界。**
 
 [项目介绍](docs/project_overview.md) · [5 分钟演示](docs/demo_guide.md) · [系统架构](docs/architecture/system_design.md) · [启动指南](docs/getting_started.md) · [RAG 与评测](docs/rag_and_evaluation.md)
 
-![CodePilot 项目概览](docs/images/overview.svg)
+![DevWorkbench 项目概览](docs/images/overview.svg)
 
 </div>
 
 ## 30 秒了解项目
 
-CodePilot 是一个面向软件研发团队的全栈 AI Agent 工程项目。它将 GitHub 的需求、代码变更、CI 日志和项目文档连接起来，辅助完成 **Issue 分诊、PR 审查、CI 排障、知识问答与工程周报**。
+DevWorkbench 是一个面向软件研发团队的全栈 AI Agent 工程项目。它将 GitHub 的需求、代码变更、CI 日志和项目文档连接起来，辅助完成 **Issue 分诊、PR 审查、CI 排障、知识问答与工程周报**。
 
 用户可以直接提问，也可以查看专项分析面板。系统检索当前仓库的证据，调用对应工具或专项 Agent，输出结构化建议、来源引用和可审查的操作草稿；支持的 GitHub 写操作须经有权限的用户确认后执行。
 
@@ -25,7 +25,7 @@ CodePilot 是一个面向软件研发团队的全栈 AI Agent 工程项目。它
 | 项目里的规则写在哪里？ | 检索项目文档与上传知识，回答中展示证据与引用 |
 | 建议能直接改 GitHub 吗？ | 先形成草稿，再由具备审批权限的人确认，记录执行审计 |
 
-**当前验证快照（2026-10-31）：265 项后端测试及 5 项 lint 兼容测试通过、4 项 Docker 集成测试因服务关闭跳过；TypeScript 检查、前端 Lint 和生产构建通过，npm 审计为 0 项。**旧版环境曾完成真实容器验证；新版沙盒镜像尚未在本机重建验证。Ragas/diskcache 使用可校验的本地源码补丁，不能据此宣称上游已发布修复或项目已全面通过安全审核，详见 [安全说明](docs/architecture/security.md)。
+**企业私有部署候选版（2026-11-10）**已验证 PostgreSQL 多实例、个人令牌与仓库隔离、加密恢复，以及 297 项后端和 Docker 沙箱测试。当前保留版本的 DeepSeek Flash 回答相关性为 0.7815，低于 0.80 门槛。六个镜像已重建并复扫，仍有安全告警待处置。[部署与运维](docs/enterprise_deployment.md) · [验收记录](docs/enterprise_validation.md)
 
 ## 项目界面
 
@@ -75,7 +75,7 @@ CodePilot 是一个面向软件研发团队的全栈 AI Agent 工程项目。它
 
 ## 系统架构
 
-![CodePilot 系统架构](docs/images/architecture.svg)
+![DevWorkbench 系统架构](docs/images/architecture.svg)
 
 | 层次 | 主要技术 |
 | --- | --- |

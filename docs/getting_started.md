@@ -61,7 +61,7 @@ Set-Location ..
 
 ```powershell
 backend/.venv/Scripts/python.exe -m pip install -r backend/requirements-local-embedding.txt
-docker compose up -d postgres etcd minio milvus
+docker compose up -d postgres milvus
 ```
 
 如果已在 Windows 安装 PostgreSQL，且项目已有 `.data/pgdata` 数据目录，可复用原数据库，不必再启动占用同一 5432 端口的容器：
@@ -112,7 +112,7 @@ npm run dev
 - **页面提示后端不可达**：检查 API 进程、`NEXT_PUBLIC_API_BASE_URL` 与 CORS 地址；查看启动日志。
 - **PostgreSQL 无法连接**：先运行 `python -m app.db.doctor`。服务未启动时运行 `scripts/start_postgres.ps1` 或 `docker compose up -d postgres`；核对 `.env` 的主机、端口、库名、账号和密码。不要同时启动两个占用 5432 的实例，也不要删除原数据目录来解决连接问题。
 - **页面要求令牌**：这是 `DEMO_MODE=false` 的预期行为。使用管理员命令生成的令牌，不是 GitHub PAT。
-- **Milvus 不可用**：核对 Compose 宿主机端口 19531 与 URI，并检查 etcd、对象存储和 Milvus 日志。
+- **Milvus 不可用**：核对 Compose 宿主机端口 19531 与 URI，并检查 Milvus 日志。新版使用官方 Milvus 镜像的本地存储与内嵌 etcd，不需要安装第三方对象存储。旧向量卷需从原始文档重建，新卷不会自动读取旧版对象存储。
 - **Embedding contract mismatch**：核对 provider、模型和维度；不要截断或补零混用向量。
 - **固定评测集未就绪**：先上传 `docs/datas/evals/codepilot_baseline.md`，待处理完成再选择固定基线。
 - **脚本受到本机执行策略限制**：检查本机 PowerShell 配置，或按文档分别启动服务；不要为演示关闭系统安全防护。

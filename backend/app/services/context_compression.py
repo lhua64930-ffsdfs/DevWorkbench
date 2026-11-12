@@ -8,9 +8,11 @@ from app.core.config import settings
 
 TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]|[a-zA-Z0-9_\-]+|[^\s]")
 WORD_PATTERN = re.compile(r"[a-zA-Z0-9_\-\u4e00-\u9fff]+")
-SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?\n\u3002\uff01\uff1f])\s+")
+SENTENCE_SPLIT_PATTERN = re.compile(r"[\r\n]+|(?<=[。！？])\s*|(?<=[.!?])\s+")
+SNIPPET_TERM_PATTERN = re.compile(r"[a-z0-9_\-]+|[\u4e00-\u9fff]+")
 
 MODEL_CONTEXT_WINDOWS = {
+    "deepseek-flash": 1_000_000,
     "deepseek-v4-pro": 1_000_000,
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
@@ -32,6 +34,7 @@ MODEL_CONTEXT_WINDOWS = {
 }
 
 MODEL_OUTPUT_WINDOWS = {
+    "deepseek-flash": 384_000,
     "deepseek-v4-pro": 384_000,
     "gpt-4o": 16_384,
     "gpt-4o-mini": 16_384,
@@ -542,23 +545,29 @@ def microcompact_messages(
 
 
 def extract_relevant_snippet(query: str, text: str, max_tokens: int = 220) -> str:
-    clean = " ".join(str(text or "").replace("\r", "\n").split())
+    text = str(text or "")
+    clean = " ".join(text.split())
     if not clean:
         return ""
-    terms = set(_words(query))
-    if not terms:
+    normalized_query = " ".join((query or "").lower().split())
+    terms = set()
+    chinese_terms = set()
+    for term in SNIPPET_TERM_PATTERN.findall(normalized_query):
+        if term.isascii():
+            terms.add(term)
+        else:
+            chinese_terms.update(term[index : index + 2] for index in range(max(1, len(term) - 1)))
+    if not terms and not chinese_terms:
         return clip_to_token_budget(clean, max_tokens)
 
-    sentences = [part.strip() for part in SENTENCE_SPLIT_PATTERN.split(clean) if part.strip()]
-    if not sentences:
-        sentences = [clean]
+    sentences = [" ".join(part.split()) for part in SENTENCE_SPLIT_PATTERN.split(text) if part.strip()]
 
     scored: list[tuple[float, int, str]] = []
     for index, sentence in enumerate(sentences):
         lower = sentence.lower()
-        matched = [term for term in terms if term and term in lower]
-        score = len(set(matched)) * 3.0 + sum(lower.count(term) for term in matched)
-        if query.lower().strip() and query.lower().strip() in lower:
+        score = len(terms.intersection(SNIPPET_TERM_PATTERN.findall(lower))) * 4
+        score += sum(term in lower for term in chinese_terms)
+        if normalized_query in lower:
             score += 4.0
         scored.append((score, index, sentence))
 
@@ -567,9 +576,17 @@ def extract_relevant_snippet(query: str, text: str, max_tokens: int = 220) -> st
         return clip_to_token_budget(clean, max_tokens)
 
     positive.sort(key=lambda item: (-item[0], item[1]))
-    selected = sorted(positive[:4], key=lambda item: item[1])
-    snippet = " ".join(sentence for _score, _index, sentence in selected)
-    return clip_to_token_budget(snippet, max_tokens)
+    selected: list[tuple[int, str]] = []
+    for _score, index, sentence in positive:
+        candidate = " ".join(part for _, part in [*selected, (index, sentence)])
+        if estimate_tokens(candidate) > max_tokens:
+            if not selected:
+                return clip_to_token_budget(sentence, max_tokens)
+            continue
+        selected.append((index, sentence))
+        if len(selected) == 4:
+            break
+    return " ".join(sentence for _, sentence in sorted(selected))
 
 
 def compress_retrieval_results(
@@ -617,7 +634,7 @@ def compress_retrieval_results(
     return compressed
 
 
-COMPACT_SUMMARY_SYSTEM_PROMPT = """请在上下文压缩后，为 CodePilot 创建一份可延续工作的摘要。
+COMPACT_SUMMARY_SYSTEM_PROMPT = """请在上下文压缩后，为 DevWorkbench 创建一份可延续工作的摘要。
 目标不是单纯减少 token，而是为软件工程 Agent 保留工作连续性。
 
 请用纯文本返回以下部分：

@@ -43,7 +43,7 @@ async def send_negative_feedback_notification(
 
     run_id = feedback.run_id or "未关联"
     lines = [
-        "CodePilot 收到一条负反馈",
+        "DevWorkbench 收到一条负反馈",
         f"项目：{repo.full_name}",
         f"反馈人：{reporter.name if reporter else '内部用户'}",
         f"trace_id：{run_id}",
@@ -63,6 +63,8 @@ async def send_negative_feedback_notification(
     lines.append(f"执行轨迹：{_trace_url(run_id)}" if feedback.run_id else "执行轨迹：该历史回答未关联 run_id")
 
     try:
+        from app.core.production import validate_outbound_url
+        validate_outbound_url(webhook_url)
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
                 webhook_url,

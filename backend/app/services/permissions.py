@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from app.db.models import AuditLog, User
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "owner": {"repo:read", "repo:sync", "agent:run", "draft:create", "draft:approve", "eval:read", "settings:manage"},
+    "owner": {"repo:read", "repo:sync", "agent:run", "draft:create", "draft:approve", "eval:read", "settings:manage", "metrics:read"},
+    "monitor": {"metrics:read"},
     "maintainer": {"repo:read", "repo:sync", "agent:run", "draft:create", "draft:approve", "eval:read"},
     "developer": {"repo:read", "agent:run", "draft:create", "eval:read"},
     "viewer": {"repo:read", "eval:read"},

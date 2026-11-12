@@ -33,7 +33,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     {children}
   </>;
   return <main className="mx-auto mt-24 max-w-md rounded-xl border bg-white p-6">
-    <h1 className="mb-4 text-xl font-semibold">连接 CodePilot</h1>
+    <h1 className="mb-4 text-xl font-semibold">连接 DevWorkbench</h1>
     <p className="mb-4 text-sm text-slate-600">使用管理员提供的个人访问令牌。令牌仅保留在当前浏览器标签页会话中。</p>
     <form onSubmit={(event) => {
       event.preventDefault();

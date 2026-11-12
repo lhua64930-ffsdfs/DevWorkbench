@@ -2,7 +2,7 @@
 
 [返回 README](../../README.md) · [Agent 工作流](agent_workflow.md) · [数据模型](database_schema.md)
 
-![CodePilot 系统架构](../images/architecture.svg)
+![DevWorkbench 系统架构](../images/architecture.svg)
 
 ## 服务职责
 

@@ -42,6 +42,7 @@ class GenericToolArgs(BaseModel):
 
 
 class ConversationState(TypedDict, total=False):
+    grounding_evidence: list[dict[str, Any]]
     message: str
     context: dict[str, Any]
     tools: dict[str, StructuredTool]

@@ -117,26 +117,21 @@ def _stored_checkout_path(repo: Repository) -> Path | None:
     path = Path(os.path.expandvars(os.path.expanduser(str(raw_path))))
     if not path.is_absolute():
         path = Path.cwd() / path
-    return path.resolve()
+    resolved = path.resolve()
+    if settings.app_env.lower() == "production" and (getattr(repo, "checkout_mode", None) == "local" or resolved != _repo_checkout_path(repo).resolve()):
+        raise ValueError("Production requires this repository's managed checkout")
+    return resolved
 
 
 def _clone_url(repo: Repository) -> str:
+    from app.core.production import validate_outbound_url
     if repo.clone_url:
-        return repo.clone_url
-    return f"https://github.com/{repo.owner}/{repo.name}.git"
-
-
-def _clone_url_with_token(url: str, token: str | None) -> str:
-    if not token:
-        return url
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or "@" in parsed.netloc:
-        return url
-    safe_token = quote(token, safe="")
-    return urlunparse(parsed._replace(netloc=f"x-access-token:{safe_token}@{parsed.netloc}"))
+        return validate_outbound_url(repo.clone_url)
+    return validate_outbound_url(f"https://github.com/{repo.owner}/{repo.name}.git")
 
 
 def _run_git(args: list[str], cwd: Path | None = None) -> None:
+    from app.core.git_credentials import git_environment
     subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
@@ -145,6 +140,7 @@ def _run_git(args: list[str], cwd: Path | None = None) -> None:
         stderr=subprocess.PIPE,
         text=True,
         timeout=180,
+        env=git_environment(),
     )
 
 
@@ -163,8 +159,16 @@ def _is_git_work_tree(path: Path) -> bool:
 
 
 def _sync_checkout(repo: Repository, token: str | None) -> Path:
+    from app.core.git_credentials import git_credentials
+    with git_credentials(token, _clone_url(repo)):
+        return _sync_checkout_authenticated(repo)
+
+
+def _sync_checkout_authenticated(repo: Repository) -> Path:
     stored_path = _stored_checkout_path(repo)
     checkout_mode = getattr(repo, "checkout_mode", None) or "managed"
+    if settings.app_env.lower() == "production" and checkout_mode == "local":
+        raise RuntimeError("生产环境禁止非托管工作区")
 
     if stored_path and checkout_mode == "local":
         if not _is_git_work_tree(stored_path):
@@ -172,13 +176,19 @@ def _sync_checkout(repo: Repository, token: str | None) -> Path:
         return stored_path
 
     target = stored_path or _repo_checkout_path(repo)
-    clone_url = _clone_url_with_token(_clone_url(repo), token)
+    clone_url = _clone_url(repo)
+    if settings.app_env.lower() == "production":
+        if checkout_mode == "local" or not target.resolve().is_relative_to(_checkout_root().resolve()):
+            raise RuntimeError("生产 checkout 必须位于托管仓库目录")
     branch = repo.default_branch or "main"
 
     if not shutil.which("git"):
         raise RuntimeError("未找到 git 可执行文件，无法克隆仓库代码")
 
     if (target / ".git").exists() or _is_git_work_tree(target):
+        if settings.app_env.lower() == "production":
+            from app.core.production import validate_outbound_url
+            validate_outbound_url(_git_text(["remote", "get-url", "origin"], target))
         try:
             _run_git(["fetch", "--depth", "1", "origin", branch], cwd=target)
             _run_git(["checkout", branch], cwd=target)
@@ -280,7 +290,7 @@ def _sync_code_graph(
     for path in checkout_path.rglob("*"):
         if files_seen >= max_files:
             break
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(checkout_path.resolve()):
             continue
         if any(part in SKIP_DIRS for part in path.relative_to(checkout_path).parts):
             continue
@@ -314,7 +324,7 @@ def _sync_code_graph(
     db.flush()
     by_name = {row.name: row for row in symbol_rows}
     for path in checkout_path.rglob("*"):
-        if not path.is_file() or any(part in SKIP_DIRS for part in path.relative_to(checkout_path).parts) or not _is_text_candidate(path):
+        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(checkout_path.resolve()) or any(part in SKIP_DIRS for part in path.relative_to(checkout_path).parts) or not _is_text_candidate(path):
             continue
         text = _read_text(path, max_bytes=180_000)
         if not text:

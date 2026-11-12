@@ -1151,6 +1151,13 @@ def _build_conversation_tools(repo: Repository | None, conversation: Conversatio
         report["metrics"]["workflow_run_id"] = str(workflow_run_id)
         return _engineering_workflow_response(repo, workflow_run_id, report)
 
+    try:
+        _workspace_root(repo)
+        workspace_available = True
+    except ValueError:
+        workspace_available = False
+    for function in (list_workspace_files, read_workspace_file, search_workspace_code):
+        function.workspace_available = workspace_available
     return {
         "workspace.list_files": list_workspace_files,
         "workspace.read_file": read_workspace_file,

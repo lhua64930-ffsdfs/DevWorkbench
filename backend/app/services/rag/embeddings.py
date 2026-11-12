@@ -105,28 +105,34 @@ def _embed_openai_compatible(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    max_batch_size: int | None = None,
 ) -> list[list[float]]:
     api_key = api_key or settings.embedding_api_key or os.getenv("OPENAI_API_KEY") or settings.llm_api_key
-    base_url = (base_url or settings.embedding_base_url or settings.llm_base_url).rstrip("/")
+    from app.core.production import validate_outbound_url
+    base_url = validate_outbound_url((base_url or settings.embedding_base_url or settings.llm_base_url).rstrip("/"))
     model = model or settings.embedding_model
     if not api_key:
         raise RuntimeError("embedding API key is not configured")
 
+    output: list[list[float]] = []
+    batch_size = max_batch_size or len(texts) or 1
     with httpx.Client(timeout=60) as client:
-        response = client.post(
-            f"{base_url}/embeddings",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=_embedding_payload(texts, dimensions, model),
-        )
-        response.raise_for_status()
-        rows = sorted(response.json().get("data", []), key=lambda item: int(item.get("index", 0)))
-        vectors = [item.get("embedding") for item in rows]
-        if len(vectors) != len(texts):
-            raise ValueError("embedding response length mismatch")
-        return [
-            _validate_vector_dimensions([float(value) for value in vector], dimensions, "openai_compatible")
-            for vector in vectors
-        ]
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            response = client.post(
+                f"{base_url}/embeddings",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=_embedding_payload(batch, dimensions, model),
+            )
+            response.raise_for_status()
+            rows = sorted(response.json().get("data", []), key=lambda item: int(item.get("index", 0)))
+            if len(rows) != len(batch):
+                raise ValueError("embedding response length mismatch")
+            output.extend(
+                _validate_vector_dimensions([float(value) for value in row["embedding"]], dimensions, "openai_compatible")
+                for row in rows
+            )
+    return output
 
 
 @lru_cache(maxsize=4)
@@ -205,6 +211,7 @@ def embed_knowledge_texts(
             model=model,
             api_key=settings.dashscope_api_key,
             base_url=settings.dashscope_embedding_base_url,
+            max_batch_size=10,
         )
     if resolved == "openai_compatible":
         return _embed_openai_compatible(clean_texts, dimensions, model=model)

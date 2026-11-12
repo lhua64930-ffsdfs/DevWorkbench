@@ -180,7 +180,8 @@ class RagasCollectionsScorer:
                 return await asyncio.to_thread(embed_text, text)
 
         api_key = settings.ragas_judge_api_key or settings.llm_api_key
-        base_url = (settings.ragas_judge_base_url or settings.llm_base_url).rstrip("/")
+        from app.core.production import validate_outbound_url
+        base_url = validate_outbound_url((settings.ragas_judge_base_url or settings.llm_base_url).rstrip("/"))
         model = settings.ragas_judge_model or settings.llm_model
         if not api_key:
             raise RagasUnavailableError("RAGAS judge API key is not configured")
@@ -211,6 +212,14 @@ class RagasCollectionsScorer:
                 "tool_call_f1": ToolCallF1(),
             }
             self.message_types = self._message_types()
+            # Native question reconstruction must preserve the answer language;
+            # English few-shot examples otherwise add translation noise when
+            # measuring Chinese answers. The original question is never supplied
+            # to this reconstruction prompt and the scoring formula is unchanged.
+            self.metrics["answer_relevancy"].prompt.instruction += (
+                " Generate the question in the same language as the response, "
+                "preserving technical identifiers. Do not translate the question into English unless the response is English."
+            )
             self.version = importlib.metadata.version("ragas")
             self.judge_model = model
         except Exception as exc:
@@ -924,6 +933,7 @@ def _finalize_result(
             "case_count": len(rows),
         },
         "pipeline": {"top_k": limit},
+        "evaluation_contract": {"answer_relevancy_question_language": "same_as_response", "answer_relevancy_strictness": settings.ragas_answer_relevancy_strictness, "thresholds_changed": False},
         **summary_metrics,
         "summary_metrics": summary_metrics,
         "retrieval": retrieval,
@@ -965,6 +975,8 @@ async def run_rag_quality_eval(
     agent_factory: Callable[[], ChatAgent] | None = None,
     progress_callback: ProgressCallback | None = None,
     evaluation_set: dict[str, Any] | None = None,
+    resume_rows: dict[str, dict[str, Any]] | None = None,
+    case_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Evaluate the production ChatAgent path with Ragas and deterministic gates."""
 
@@ -992,6 +1004,13 @@ async def run_rag_quality_eval(
     retrieval_rows: list[dict[str, Any]] = []
     started = time.perf_counter()
     for index, case in enumerate(evaluation_cases, start=1):
+        saved = (resume_rows or {}).get(case.id)
+        if saved is not None:
+            if saved.get("question") != case.question or saved.get("reference") != case.reference:
+                raise ValueError(f"Saved evaluation row does not match case {case.id}")
+            rows.append(saved)
+            retrieval_rows.append({"results": saved["retrieved_sources"]})
+            continue
         await _emit_progress(
             progress_callback,
             stage="chatagent",
@@ -1076,6 +1095,8 @@ async def run_rag_quality_eval(
                 "latency_ms": latency_ms,
             }
         )
+        if case_callback is not None:
+            await _emit_progress(case_callback, **rows[-1])
         await _emit_progress(
             progress_callback,
             stage="case_complete",

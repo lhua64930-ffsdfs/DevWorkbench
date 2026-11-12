@@ -54,6 +54,22 @@ def test_retrieval_compression_prefers_query_relevant_sentence() -> None:
     assert "_raw_content" not in results[0]
 
 
+def test_retrieval_compression_keeps_technical_fact_after_mermaid_diagram() -> None:
+    raw_text = (
+        "## 部署结构\n\n```mermaid\nflowchart LR\n"
+        + ("API[应用接口] --> DB[(PostgreSQL 18)]\n" * 30)
+        + "```\n\n只有网关发布端口。PostgreSQL 以 postgres 用户（UID/GID 70）运行。"
+    )
+    results = compress_retrieval_results(
+        "PostgreSQL 服务以什么 UID 和 GID 运行？",
+        [{"id": "deployment", "_raw_content": raw_text}],
+        max_tokens_per_item=28,
+    )
+
+    assert "PostgreSQL 以 postgres 用户（UID/GID 70）运行。" in results[0]["snippet"]
+    assert estimate_tokens(results[0]["snippet"]) <= 28
+
+
 def test_retrieval_compression_respects_global_token_budget() -> None:
     results = compress_retrieval_results(
         "auth token",

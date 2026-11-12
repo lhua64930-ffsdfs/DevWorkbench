@@ -1,10 +1,12 @@
 import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage
+from langchain_openai import ChatOpenAI
 
 from app.api.routes.chat import _build_conversation_tools, _repo_checkout_path
 from app.core.config import settings
@@ -535,6 +537,43 @@ async def test_chat_agent_combines_prefetched_evidence_with_rewritten_rag_search
 
 
 @pytest.mark.asyncio
+async def test_chat_agent_grounds_answer_in_search_results_outside_evaluation(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "grounded_answers_enabled", True)
+    model = ChatOpenAI(
+        model="qwen3.7-max", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="unit-test-no-network",
+    )
+    monkeypatch.setattr(ChatOpenAI, "bind_tools", lambda self, tools: RewrittenRagModel())
+    prompts = []
+
+    async def verify(self, messages, **kwargs):
+        assert kwargs["extra_body"] == {"enable_thinking": False}
+        prompts.append(json.loads(messages[-1].content))
+        return AIMessage(content="Only idempotent operations can be retried.")
+
+    async def search_rag(input_data, context):
+        query = input_data["query"]
+        return {
+            "route": "semantic_search",
+            "answer": f"Evidence for {query}",
+            "retrieval_results": [{"title": "Runbook", "snippet": f"Evidence for {query}"}],
+        }
+
+    monkeypatch.setattr(ChatOpenAI, "ainvoke", verify)
+    result = await ChatAgent(model=model).run(
+        {"message": "How should auth retries work?"},
+        {"tools": {"rag.search_similar_documents": search_rag},
+         "evidence": [{"title": "Overview", "content": "This document introduces auth."}]},
+    )
+    assert result["answer"] == "Only idempotent operations can be retried."
+    assert len(prompts) == 1
+    assert [record["text"] for record in prompts[0]["evidence"]] == [
+        "Evidence for idempotent retry decision",
+        "Evidence for token refresh timeout history",
+        "This document introduces auth.",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_chat_agent_evaluation_mode_preserves_prefetch_and_tool_retrieval_contexts() -> None:
     model = RewrittenRagModel()
 
@@ -613,7 +652,7 @@ async def test_project_overview_without_llm_uses_workspace_evidence(monkeypatch)
         return {
             "route": "workspace_read_file",
             "tool_calls": [{"tool_name": "workspace.read_file", "arguments": input_data, "status": "success"}],
-            "answer": "README.md:1-2\n1: # CodePilot\n2: Core capability: repository analysis.",
+            "answer": "README.md:1-2\n1: # DevWorkbench\n2: Core capability: repository analysis.",
             "citations": [],
         }
 
@@ -734,7 +773,7 @@ def test_assignment_prompt_treats_empty_team_as_no_candidates() -> None:
     )
 
     assert "team_members: []" in prompt
-    assert "当前仓库还没有配置 CodePilot 团队成员" in prompt
+    assert "当前仓库还没有配置 DevWorkbench 团队成员" in prompt
     assert "不要把仓库内容" in prompt
 
 

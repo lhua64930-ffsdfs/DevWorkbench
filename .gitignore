@@ -1,5 +1,9 @@
 # Local environment
 .env
+deploy/production.env
+deploy/tls/
+deploy/backups/
+*.cpbackup
 .env.*
 !.env.example
 .mcp.json

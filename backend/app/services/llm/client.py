@@ -5,12 +5,13 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.core.production import validate_outbound_url
 from app.services.context_compression import prompt_cache_model_kwargs
 
 
 class LLMClient:
     def __init__(self) -> None:
-        self.base_url = settings.llm_base_url.rstrip("/")
+        self.base_url = validate_outbound_url(settings.llm_base_url.rstrip("/"))
         self.api_key = settings.llm_api_key
         self.model = settings.llm_model
 
@@ -25,6 +26,7 @@ class LLMClient:
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
             "response_format": {"type": "json_object"},
+            "max_tokens": settings.context_reserved_response_tokens,
         }
         payload.update(prompt_cache_model_kwargs())
         async with httpx.AsyncClient(timeout=60) as client:
@@ -51,6 +53,7 @@ class LLMClient:
                 {"role": "user", "content": user_message},
             ],
         }
+        payload["max_tokens"] = settings.context_reserved_response_tokens
         payload.update(prompt_cache_model_kwargs())
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
@@ -70,6 +73,7 @@ class LLMClient:
 
         payload_messages = [{"role": "system", "content": system_prompt}, *messages]
         payload: dict[str, Any] = {"model": self.model, "messages": payload_messages, "stream": True}
+        payload["max_tokens"] = settings.context_reserved_response_tokens
         payload.update(prompt_cache_model_kwargs())
         async with httpx.AsyncClient(timeout=60) as client:
             async with client.stream(

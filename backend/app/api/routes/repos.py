@@ -16,6 +16,7 @@ from app.db.models import ActionDraft, AgentRun, AgentTaskRun, AgentWorkflowRun,
 from app.db.session import get_db
 from app.schemas.repos import RepoConnectRequest, RepoConnectResponse, RepoResponse, RepoSyncRequest, RepoSyncResponse
 from app.core.config import settings
+from app.core.production import validate_outbound_url
 from app.core.security import encrypt_token
 from app.services.github.client import GitHubClient
 from app.services.code_analysis import sync_repository_code_analysis_by_id
@@ -157,6 +158,13 @@ def _clone_target_from_parent(raw_parent: str, repo_name: str) -> Path:
 
 @router.post("/connect", response_model=RepoConnectResponse)
 async def connect_repo(payload: RepoConnectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> RepoConnectResponse:
+    if settings.app_env.lower() == "production":
+        if payload.local_path or payload.clone_parent_dir or payload.demo_mode:
+            raise HTTPException(400, "生产环境只允许托管仓库，禁止客户端指定主机路径或演示模式")
+        try:
+            validate_outbound_url(payload.api_base_url or settings.github_api_base_url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     local_path = _clean_text(payload.local_path)
     clone_parent_dir = _clean_text(payload.clone_parent_dir)
     owner = _clean_text(payload.owner)
@@ -191,7 +199,7 @@ async def connect_repo(payload: RepoConnectRequest, background_tasks: Background
     fallback_message: str | None = None
     repo_data = {
         "id": None,
-        "description": "Demo repository for CodePilot",
+        "description": "Demo repository for DevWorkbench",
         "default_branch": remote_info.default_branch if remote_info and remote_info.default_branch else "main",
         "clone_url": remote_info.clone_url if remote_info else f"https://github.com/{owner}/{repo_name}.git",
     }

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 class WorkspaceCreateRequest(BaseModel):
     name: str
     description: str | None = None
-    repo_ids: list[UUID] = Field(default_factory=list)
+    repo_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
 
 class WorkspaceResponse(BaseModel):
@@ -23,7 +23,7 @@ class WorkspaceResponse(BaseModel):
 
 class MultiRepoReportRequest(BaseModel):
     workspace_id: UUID | None = None
-    repo_ids: list[UUID] = Field(default_factory=list)
+    repo_ids: list[UUID] = Field(default_factory=list, max_length=20)
     start_date: date
     end_date: date
 

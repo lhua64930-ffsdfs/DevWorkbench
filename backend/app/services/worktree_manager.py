@@ -38,6 +38,7 @@ def _snapshot_lock(key: str) -> threading.Lock:
 
 
 def _run_git(args: list[str], cwd: Path) -> str:
+    from app.core.git_credentials import git_environment
     result = subprocess.run(
         ["git", *args],
         cwd=str(cwd),
@@ -46,6 +47,7 @@ def _run_git(args: list[str], cwd: Path) -> str:
         stderr=subprocess.PIPE,
         text=True,
         timeout=180,
+        env=git_environment(),
     )
     return result.stdout.strip()
 
@@ -110,6 +112,14 @@ def _snapshot_response(
 
 
 def prepare_pr_worktree(db: Session, repo: Repository, pr: PullRequest) -> dict[str, Any]:
+    from app.core.git_credentials import git_credentials
+    from app.services.code_analysis import _clone_url
+    token = decrypt_token(repo.github_token_encrypted, settings.token_encryption_key) if repo.github_token_encrypted else None
+    with git_credentials(token, _clone_url(repo)):
+        return _prepare_pr_worktree(db, repo, pr)
+
+
+def _prepare_pr_worktree(db: Session, repo: Repository, pr: PullRequest) -> dict[str, Any]:
     """Prepare a PR branch snapshot for live search and refresh its code graph."""
     lock_key = f"{repo.id}:{pr.id}"
     lock = _snapshot_lock(lock_key)

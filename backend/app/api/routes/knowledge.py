@@ -299,6 +299,8 @@ async def upload_knowledge_file(
     chunks = await asyncio.to_thread(chunk_document, text, filename, 1800, 180)
     if not chunks:
         raise HTTPException(status_code=400, detail="Document did not produce indexable chunks")
+    if len(chunks) > settings.max_document_chunks:
+        raise HTTPException(status_code=422, detail="文档分块数量超限，请拆分后上传")
     payloads = [
         DocumentPayload(
             source_type="knowledge_file",

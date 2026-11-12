@@ -8,6 +8,9 @@ import dataclasses
 import importlib
 import inspect
 import logging
+import os
+import signal
+import sys
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -18,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import BackgroundJob
 from app.db.session import SessionLocal
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 HANDLERS = {
@@ -100,7 +104,8 @@ def schedule_job(db: Session, background: BackgroundTasks, handler, *args) -> Ba
     job = BackgroundJob(kind=handler.__name__, payload={"args": _encode(list(args))})
     db.add(job)
     db.commit()
-    background.add_task(run_job_by_id, job.id)
+    if settings.background_execution_mode == "embedded" and settings.app_env.lower() != "production":
+        background.add_task(run_job_by_id, job.id)
     return job
 
 
@@ -115,10 +120,39 @@ async def _heartbeat(job_id, token):
     while True:
         await asyncio.sleep(LEASE_SECONDS / 3)
         with SessionLocal() as db:
-            db.query(BackgroundJob).filter_by(id=job_id, lease_token=token, status="running").update(
+            owned = db.query(BackgroundJob).filter_by(id=job_id, lease_token=token, status="running").update(
                 {"lease_until": datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)}, synchronize_session=False,
             )
             db.commit()
+            if not owned:
+                raise RuntimeError("Worker lease lost")
+
+
+async def _subprocess_handler(job_id, token):
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "app.job_runner", str(job_id), token,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        code = await process.wait()
+        if code:
+            raise RuntimeError("Isolated job process failed")
+    finally:
+        if process.returncode is None:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            await process.wait()
+
+
+async def _invoke_handler(kind, payload):
+    handler = getattr(importlib.import_module(HANDLERS[kind]), kind)
+    args = _decode(payload["args"])
+    if inspect.iscoroutinefunction(handler):
+        await handler(*args)
+    else:
+        await asyncio.to_thread(handler, *args)
 
 
 async def run_job_by_id(job_id: UUID) -> bool:
@@ -135,14 +169,17 @@ async def run_job_by_id(job_id: UUID) -> bool:
         job = db.get(BackgroundJob, job_id)
         kind, payload, attempts = job.kind, job.payload, job.attempts
     heartbeat = asyncio.create_task(_heartbeat(job_id, token))
+    execution = asyncio.create_task(_subprocess_handler(job_id, token) if settings.app_env.lower() == "production" else _invoke_handler(kind, payload))
     error = None
     try:
-        handler = getattr(importlib.import_module(HANDLERS[kind]), kind)
         args = _decode(payload["args"])
-        if inspect.iscoroutinefunction(handler):
-            await handler(*args)
-        else:
-            await asyncio.to_thread(handler, *args)
+        finished, _ = await asyncio.wait({execution, heartbeat}, timeout=settings.job_timeout_seconds, return_when=asyncio.FIRST_COMPLETED)
+        if heartbeat in finished:
+            await heartbeat
+            raise RuntimeError("Worker heartbeat stopped")
+        if execution not in finished:
+            raise TimeoutError("Job execution deadline exceeded")
+        await execution
         if kind == "process_knowledge_document":
             from app.db.models import KnowledgeSourceDocument
             with SessionLocal() as db:
@@ -151,17 +188,24 @@ async def run_job_by_id(job_id: UUID) -> bool:
                     raise RuntimeError(document.error_message or "Document processing failed")
     except Exception as exc:
         logger.exception("Background job failed: %s", job_id)
-        error = f"{type(exc).__name__}: {exc}"
+        error = type(exc).__name__ if settings.app_env.lower() == "production" else f"{type(exc).__name__}: {exc}"
     finally:
         heartbeat.cancel()
-        with suppress(asyncio.CancelledError):
+        execution.cancel()
+        with suppress(asyncio.CancelledError, Exception):
             await heartbeat
+        with suppress(asyncio.CancelledError, Exception):
+            await execution
     with SessionLocal() as db:
-        db.query(BackgroundJob).filter_by(id=job_id, lease_token=token).update({
+        changed = db.query(BackgroundJob).filter_by(id=job_id, lease_token=token, status="running").update({
             "status": "completed" if error is None else ("queued" if attempts < MAX_ATTEMPTS else "failed"),
             "error": error, "lease_token": None, "lease_until": None,
             "available_at": datetime.now(timezone.utc) + timedelta(seconds=10 * attempts),
         }, synchronize_session=False)
+        if not changed:
+            db.rollback()
+            logger.warning("Worker lost lease before completion: %s", job_id)
+            return False
         terminal = db.get(BackgroundJob, job_id)
         if terminal.status == "failed":
             _record_terminal_failure(db, terminal)
@@ -169,24 +213,35 @@ async def run_job_by_id(job_id: UUID) -> bool:
     return True
 
 
-async def job_worker_loop():
+async def job_worker_loop(kinds: list[str] | None = None):
     while True:
         try:
             with SessionLocal() as db:
                 # Repeated process crashes must not produce unlimited retries.
-                expired = db.query(BackgroundJob).filter(
+                expired_query = db.query(BackgroundJob).filter(
                     BackgroundJob.status == "running", BackgroundJob.lease_until < datetime.now(timezone.utc),
                     BackgroundJob.attempts >= MAX_ATTEMPTS,
-                ).all()
+                )
+                if kinds:
+                    expired_query = expired_query.filter(BackgroundJob.kind.in_(kinds))
+                expired = expired_query.all()
                 for job in expired:
-                    job.status = "failed"
-                    job.error = "Worker interrupted repeatedly; retry budget exhausted"
-                    job.lease_token = None
-                    _record_terminal_failure(db, job)
+                    changed = db.query(BackgroundJob).filter(
+                        BackgroundJob.id == job.id, BackgroundJob.status == "running",
+                        BackgroundJob.lease_token == job.lease_token,
+                        BackgroundJob.lease_until < datetime.now(timezone.utc),
+                        BackgroundJob.attempts >= MAX_ATTEMPTS,
+                    ).update({"status": "failed", "error": "Worker interrupted repeatedly; retry budget exhausted", "lease_token": None, "lease_until": None}, synchronize_session=False)
+                    if changed:
+                        db.refresh(job)
+                        _record_terminal_failure(db, job)
                 db.commit()
-                ids = list(db.scalars(select(BackgroundJob.id).where(_eligible(datetime.now(timezone.utc))).order_by(BackgroundJob.created_at).limit(10)))
+                query = select(BackgroundJob.id).where(_eligible(datetime.now(timezone.utc)))
+                if kinds:
+                    query = query.where(BackgroundJob.kind.in_(kinds))
+                ids = list(db.scalars(query.order_by(BackgroundJob.created_at).limit(10)))
             for job_id in ids:
                 await run_job_by_id(job_id)
         except Exception:
             logger.exception("Job worker poll failed")
-        await asyncio.sleep(3)
+        await asyncio.sleep(settings.worker_poll_seconds)

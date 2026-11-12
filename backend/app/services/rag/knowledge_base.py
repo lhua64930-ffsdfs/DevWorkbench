@@ -164,7 +164,8 @@ async def _qwen_rerank(
     base_url = (settings.rerank_base_url or "").rstrip("/")
     if not api_key or not base_url:
         raise RuntimeError("Qwen rerank API is not configured")
-    endpoint = base_url if base_url.endswith("/reranks") else f"{base_url}/reranks"
+    from app.core.production import validate_outbound_url
+    endpoint = validate_outbound_url(base_url if base_url.endswith("/reranks") else f"{base_url}/reranks")
     documents = [
         "\n".join(
             part

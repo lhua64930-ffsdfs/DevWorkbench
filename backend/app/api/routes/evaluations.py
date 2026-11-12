@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from app.core.config import settings
 from sqlalchemy.orm import Session
 
 from app.db.models import ActionDraft, EvalRun, Repository, User
@@ -121,6 +122,8 @@ async def run_rag_eval(
             "sha256": None,
             "case_count": None,
         }
+    if cases is not None and len(cases) > settings.max_eval_cases:
+        raise HTTPException(status_code=422, detail="评测用例数量超出单任务限制")
     result = _job_result(
         status="queued",
         stage="queued",
@@ -263,6 +266,8 @@ async def rescore_eval(
     if source is None:
         raise HTTPException(status_code=404, detail="未找到 Eval run")
     source_result = source.result_json or {}
+    if len(source_result.get("cases") or []) > settings.max_eval_cases:
+        raise HTTPException(status_code=422, detail="重评分用例数量超出单任务限制")
     if not source_result.get("cases"):
         raise HTTPException(status_code=400, detail="原评测没有可用于重评分的逐题现场")
     error_count = sum(bool(item.get("ragas_errors")) for item in source_result.get("cases") or [])
