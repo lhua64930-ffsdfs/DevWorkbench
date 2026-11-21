@@ -89,6 +89,8 @@ type EvalSet = {
   source?: string;
   sha256?: string | null;
   case_count?: number | null;
+  case_budget?: number;
+  snapshot?: { id: string; label: string; sha256: string };
 };
 
 type EvalResult = {
@@ -102,6 +104,7 @@ type EvalResult = {
   rescore_of?: string | null;
   target?: { name?: string; repo_id?: string; execution?: string };
   evaluation_set?: EvalSet;
+  token_budget?: { limit: number; committed: number; reported: number; blocked: boolean };
   pipeline?: { top_k?: number };
   summary_metrics?: Record<string, number>;
   retrieval?: { recall_at_k?: number; precision_at_k?: number; mrr?: number; ndcg?: number };
@@ -152,11 +155,15 @@ type EvalSuite = {
   schema_version: number;
   case_count: number | null;
   sha256: string | null;
-  source: "fixed" | "auto_smoke";
+  source: "fixed" | "auto_smoke" | "published";
   ready: boolean;
   missing_sources: string[];
   recommended: boolean;
 };
+
+type EvalConfig = { max_cases: number; max_tokens: number; answer_model: string; judge_model: string };
+type SnapshotOptions = { active_id: string | null; items: { id: string; label: string }[] };
+type ReleaseDecision = { eval_id: string; allowed: boolean; reasons: string[] };
 
 type EvalComparison = {
   base_eval_id: string;
@@ -212,6 +219,14 @@ export default function EvalsPage() {
   const [suites, setSuites] = useState<EvalSuite[]>([]);
   const [suiteId, setSuiteId] = useState("");
   const [topK, setTopK] = useState(5);
+  const [caseBudget, setCaseBudget] = useState(20);
+  const [tokenBudget, setTokenBudget] = useState(150000);
+  const [snapshots, setSnapshots] = useState<SnapshotOptions | null>(null);
+  const [snapshotId, setSnapshotId] = useState("");
+  const [releaseDecision, setReleaseDecision] = useState<ReleaseDecision | null>(null);
+  const [checkingGate, setCheckingGate] = useState(false);
+  const [runJudge, setRunJudge] = useState(true);
+  const [config, setConfig] = useState<EvalConfig | null>(null);
   const [result, setResult] = useState<EvalResponse | null>(null);
   const [history, setHistory] = useState<EvalHistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -237,21 +252,36 @@ export default function EvalsPage() {
         setRepoId(items[0]?.id || "");
       })
       .catch(() => setRepos([]));
+    apiGet<EvalConfig>("/api/evals/config").then((value) => {
+      setConfig(value);
+      setTokenBudget(Math.min(150000, value.max_tokens));
+    }).catch(() => setConfig(null));
   }, []);
 
   useEffect(() => {
     if (!repoId) return;
+    let current = true;
     setError("");
     setNotice("");
     setDraftId("");
     setComparison(null);
+    setReleaseDecision(null);
+    setBaselineId("");
+    setSuites([]);
+    setSuiteId("");
+    setHistory([]);
+    setResult(null);
+    setActiveEvalId("");
+    setLoading(false);
+    setSnapshotId("");
+    setSnapshots(null);
     Promise.all([
-      apiGet<EvalSuite[]>(`/api/evals/suites?repo_id=${encodeURIComponent(repoId)}`).catch(() => []),
-      loadHistory(repoId)
-    ]).then(([suiteItems, historyItems]) => {
-      setSuites(suiteItems);
-      const recommended = suiteItems.find((item) => item.recommended && item.ready) || suiteItems.find((item) => item.ready);
-      setSuiteId(recommended?.id || "");
+      apiGet<EvalHistoryItem[]>(`/api/evals?repo_id=${encodeURIComponent(repoId)}&limit=50`),
+      apiGet<SnapshotOptions>(`/api/data-assets/${encodeURIComponent(repoId)}/snapshots`),
+    ]).then(([historyItems, versions]) => {
+      if (!current) return;
+      setSnapshots(versions);
+      setHistory(historyItems);
       const active = historyItems.find((item) => ACTIVE_STATUSES.has(item.result.status || item.status));
       const latest = active || historyItems[0];
       if (latest) {
@@ -261,8 +291,28 @@ export default function EvalsPage() {
         setActiveEvalId(active.eval_id);
         setLoading(true);
       }
+    }).catch((reason) => {
+      if (current) setError(reason instanceof Error ? reason.message : "无法读取仓库评测数据");
     });
-  }, [repoId, loadHistory]);
+    return () => { current = false; };
+  }, [repoId]);
+
+  useEffect(() => {
+    if (!repoId) return;
+    let current = true;
+    setSuites([]);
+    const params = new URLSearchParams({ repo_id: repoId });
+    if (snapshotId) params.set("snapshot_id", snapshotId);
+    apiGet<EvalSuite[]>(`/api/evals/suites?${params}`).then((items) => {
+      if (!current) return;
+      setSuites(items);
+      const preferred = items.find((item) => item.ready && item.recommended) ?? items.find((item) => item.ready);
+      setSuiteId((previous) => items.some((item) => item.id === previous && item.ready) ? previous : preferred?.id ?? "");
+    }).catch((reason) => {
+      if (current) setError(reason.message);
+    });
+    return () => { current = false; };
+  }, [repoId, snapshotId]);
 
   useEffect(() => {
     if (!activeEvalId) return;
@@ -305,6 +355,11 @@ export default function EvalsPage() {
   }, [activeEvalId, loadHistory, repoId]);
 
   const selectedSuite = suites.find((item) => item.id === suiteId);
+  const budgetApplies = selectedSuite?.source === "published";
+  const hasFixedSuite = selectedSuite && selectedSuite.source !== "auto_smoke";
+  const budgetTooSmall = budgetApplies && caseBudget < (selectedSuite?.case_count ?? 0);
+  const suiteTooLarge = (selectedSuite?.case_count ?? 0) > (config?.max_cases ?? 100);
+  const invalidTokenBudget = hasFixedSuite && (!Number.isInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > (config?.max_tokens ?? 1000000));
   const status = result?.result.status || result?.status;
   const active = ACTIVE_STATUSES.has(status || "");
   const cases = result?.result.cases || [];
@@ -335,6 +390,7 @@ export default function EvalsPage() {
     setError("");
     setNotice(message);
     setComparison(null);
+    setReleaseDecision(null);
     setBaselineId("");
   }
 
@@ -352,8 +408,11 @@ export default function EvalsPage() {
         name: `${suiteId}-${new Date().toISOString().slice(0, 19)}`,
         repo_id: repoId,
         suite_id: suiteId,
-        run_judge: true,
-        top_k: topK
+        run_judge: runJudge,
+        top_k: topK,
+        ...(budgetApplies ? { case_budget: caseBudget } : {}),
+        ...(hasFixedSuite ? { token_budget: tokenBudget } : {}),
+        ...(snapshotId ? { snapshot_id: snapshotId } : {}),
       });
       beginJob(data, "固定评测任务已提交。");
       await loadHistory(repoId);
@@ -405,11 +464,27 @@ export default function EvalsPage() {
     }
   }
 
+  async function checkReleaseGate() {
+    if (!result) return;
+    setCheckingGate(true);
+    setError("");
+    try {
+      const candidate = result.result.evaluation_set?.snapshot?.id;
+      const suffix = candidate ? `?snapshot_id=${encodeURIComponent(candidate)}` : "";
+      const decision = await apiGet<ReleaseDecision>(`/api/evals/${result.eval_id}/release-gate${suffix}`);
+      setReleaseDecision(decision);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "查询发布门禁失败");
+    } finally {
+      setCheckingGate(false);
+    }
+  }
+
   return (
     <>
       <PageTitle
-        title="ChatAgent RAGAS 质量工作台"
-        description="使用固定评测集运行真实 ChatAgent，定位检索、生成和 Judge 问题，并完成重评分与回归对比。"
+        title="评测中台"
+        description="发布评测题集，运行 ChatAgent 质量评测，并逐题对比结果。"
       />
 
       <section className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
@@ -419,9 +494,18 @@ export default function EvalsPage() {
           </div>
           <label className="mt-4 block text-sm font-medium text-slate-700">
             仓库知识上下文
-            <select className="mt-2 w-full rounded-md border border-line bg-white px-3 py-2 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" value={repoId} onChange={(event) => setRepoId(event.target.value)}>
+            <select className="mt-2 w-full rounded-md border border-line bg-white px-3 py-2 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" disabled={loading} value={repoId} onChange={(event) => setRepoId(event.target.value)}>
               <option value="">请选择仓库</option>
               {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.full_name}</option>)}
+            </select>
+          </label>
+
+          <label className="mt-4 block text-sm font-medium text-slate-700">
+            知识快照
+            <select className="mt-2 w-full rounded-md border border-line bg-white px-3 py-2"
+              value={snapshotId} disabled={loading || !snapshots} onChange={(event) => setSnapshotId(event.target.value)}>
+              <option value="">当前索引{snapshots?.active_id ? "" : "（实时）"}</option>
+              {snapshots?.items.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
             </select>
           </label>
 
@@ -438,8 +522,8 @@ export default function EvalsPage() {
           </label>
 
           {selectedSuite && (
-            <div className={`mt-3 rounded-md border p-3 text-xs leading-5 ${selectedSuite.source === "fixed" ? "border-teal-100 bg-teal-50 text-teal-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
-              <div className="font-semibold">{selectedSuite.source === "fixed" ? "固定回归评测集" : "仅用于冒烟测试"}</div>
+            <div className={`mt-3 rounded-md border p-3 text-xs leading-5 ${selectedSuite.source !== "auto_smoke" ? "border-teal-100 bg-teal-50 text-teal-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+              <div className="font-semibold">{selectedSuite.source === "auto_smoke" ? "仅用于冒烟测试" : "固定回归评测集"}</div>
               <p className="mt-1">{selectedSuite.description}</p>
               <div className="mt-2 text-[11px] opacity-80">
                 {selectedSuite.case_count ? `${selectedSuite.case_count} 条 Case` : "运行时自动生成"}
@@ -448,6 +532,44 @@ export default function EvalsPage() {
               {!selectedSuite.ready && <p className="mt-2 text-rose-700">缺少来源：{selectedSuite.missing_sources.join("、")}</p>}
             </div>
           )}
+
+          {repoId && <DatasetPublisher key={repoId} repoId={repoId}
+            suite={selectedSuite?.source === "published" ? selectedSuite : undefined}
+            onPublish={(suite) => {
+              setSuites((previous) => [suite, ...previous.filter((item) => item.id !== suite.id)]);
+              setSuiteId(suite.id);
+              setCaseBudget(suite.case_count ?? 20);
+            }} />}
+
+          {budgetApplies && (
+            <label className="mt-4 block text-sm font-medium text-slate-700">
+              单次评测用例预算
+              <input type="number" min={1} max={100}
+                className="mt-2 w-full rounded-md border border-line px-3 py-2"
+                value={caseBudget} onChange={(event) => setCaseBudget(Number(event.target.value))} />
+              <span className="mt-1 block text-xs text-slate-600">按执行题数计，模型、评分和检索仍可能消耗 Token。</span>
+              {budgetTooSmall && <span className="mt-1 block text-xs text-rose-700">预算必须覆盖题集的 {selectedSuite?.case_count} 题。</span>}
+            </label>
+          )}
+
+          {hasFixedSuite && (
+            <label className="mt-4 block text-sm font-medium text-slate-700">
+              单次评测 Token 上限
+              <input type="number" min={1} max={config?.max_tokens ?? 1000000}
+                className="mt-2 w-full rounded-md border border-line px-3 py-2"
+                value={tokenBudget} onChange={(event) => setTokenBudget(Number(event.target.value))} />
+              <span className="mt-1 block text-xs text-slate-600">请求发出前预留，服务商返回用量后结算。</span>
+            </label>
+          )}
+
+          <label className="mt-4 flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={runJudge} onChange={(event) => setRunJudge(event.target.checked)} />
+            启用 RAGAS 模型评分
+          </label>
+          {config && <p className="mt-2 text-xs text-slate-600">
+            回答模型 {config.answer_model}{runJudge ? ` · Judge ${config.judge_model}` : ""} · 每次上限 {config.max_cases} 题
+          </p>}
+          {suiteTooLarge && <p className="mt-1 text-xs text-rose-700">题集超过服务的单次上限。</p>}
 
           <label className="mt-4 block text-sm font-medium text-slate-700">
             Top-K
@@ -462,9 +584,9 @@ export default function EvalsPage() {
             ))}
           </div>
 
-          <PrimaryButton onClick={runEval} disabled={loading || !repoId || !suiteId || selectedSuite?.ready === false} className="mt-6 w-full gap-2">
+          <PrimaryButton onClick={runEval} disabled={loading || !repoId || !selectedSuite?.ready || suiteTooLarge || budgetTooSmall || invalidTokenBudget || (budgetApplies && (!Number.isInteger(caseBudget) || caseBudget > 100))} className="mt-6 w-full gap-2">
             {loading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            {loading ? "后台任务运行中…" : "运行固定 RAGAS 评测"}
+            {loading ? "后台任务运行中…" : "运行评测"}
           </PrimaryButton>
         </div>
 
@@ -474,9 +596,14 @@ export default function EvalsPage() {
               <div className="text-sm font-semibold text-ink">本次评测结果</div>
               <div className="mt-1 text-xs text-slate-500">
                 {result
-                  ? `Eval ${result.eval_id.slice(0, 8)} · ${result.result.evaluation_set?.label || "未记录评测集"} · Top-K ${result.result.pipeline?.top_k || "-"}`
+                  ? `Eval ${result.eval_id.slice(0, 8)} · ${result.result.evaluation_set?.label || "未记录评测集"} · Top-K ${result.result.pipeline?.top_k || "-"}${result.result.evaluation_set?.case_budget ? ` · 预算 ${result.result.evaluation_set.case_budget} 题` : ""}`
                   : "运行后展示质量状态、完整性和逐题修复建议"}
               </div>
+              {result?.result.evaluation_set?.snapshot && <div className="mt-1 text-xs text-slate-600">知识快照 {result.result.evaluation_set.snapshot.label}</div>}
+              {result?.result.token_budget && <div className="mt-1 text-xs text-slate-600">
+                Token {result.result.token_budget.reported.toLocaleString()} 已报告 · {result.result.token_budget.committed.toLocaleString()} 已占用 / {result.result.token_budget.limit.toLocaleString()}
+                {result.result.token_budget.blocked ? " · 已拦截请求" : ""}
+              </div>}
             </div>
             {result && <StatusGroup result={result.result} active={active} />}
           </div>
@@ -500,6 +627,10 @@ export default function EvalsPage() {
               )}
 
               <div className="mt-4 flex flex-wrap gap-2">
+                <button onClick={checkReleaseGate} disabled={checkingGate}
+                  className="rounded-md border border-line px-3 py-2 text-sm font-medium text-slate-700 disabled:opacity-50">
+                  {checkingGate ? "正在检查…" : "检查发布门禁"}
+                </button>
                 <button onClick={rescoreEval} disabled={!rescoreAvailable || loading} className="inline-flex items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
                   <RefreshCcw className="h-4 w-4" />仅重试异常评分
                 </button>
@@ -507,6 +638,15 @@ export default function EvalsPage() {
                   <FileWarning className="h-4 w-4" />生成修复 Issue 草稿
                 </button>
               </div>
+              {releaseDecision?.eval_id === result.eval_id && (
+                <div role="status" className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-sm">
+                  <p className="font-medium">{releaseDecision.allowed ? "发布门禁通过" : "发布门禁拒绝"}</p>
+                  <p className="mt-1 break-all text-xs text-slate-600">评测 ID {releaseDecision.eval_id}</p>
+                  {releaseDecision.reasons.length > 0 && <ul className="mt-2 list-disc pl-5 text-slate-700">
+                    {releaseDecision.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                  </ul>}
+                </div>
+              )}
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {metricRows.map((metric) => <MetricCard key={metric.key} label={metric.label} description={metric.description} detail={metric.detail} />)}
@@ -595,6 +735,83 @@ export default function EvalsPage() {
         </div>
       </section>
     </>
+  );
+}
+
+function DatasetPublisher({ repoId, suite, onPublish }: {
+  repoId: string; suite?: EvalSuite; onPublish: (value: EvalSuite) => void;
+}) {
+  const [key, setKey] = useState("");
+  const [label, setLabel] = useState("");
+  const [description, setDescription] = useState("");
+  const [source, setSource] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const path = `/api/evals/datasets/${encodeURIComponent(repoId)}`;
+  const field = "mt-1 w-full rounded-md border border-line px-2 py-1.5";
+
+  async function readVersion() {
+    if (!suite) return;
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      const version = await apiGet<{ cases: unknown[] }>(`${path}/${encodeURIComponent(suite.id.slice("dataset:".length))}`);
+      setKey(suite.name);
+      setLabel(suite.label.replace(/ · v\d+$/, ""));
+      setDescription(suite.description);
+      setSource(JSON.stringify(version.cases, null, 2));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法读取已发布版本");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function publish(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      const input = JSON.parse(source);
+      const cases = Array.isArray(input) ? input : input?.cases;
+      if (!Array.isArray(cases) || !cases.length) throw new Error("请填写至少一题，使用 JSON 数组或含 cases 的 JSON 对象。");
+      const published = await apiPost<EvalSuite>(`${path}/publish`, { dataset_key: key.trim(), label: label.trim(), description, cases });
+      onPublish(published);
+      setNotice(`${published.label} 已发布。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "发布评测集失败");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <details className="mt-4 rounded-md border border-line p-3 text-sm">
+      <summary className="cursor-pointer font-medium text-ink">管理题集版本</summary>
+      <form onSubmit={publish} className="mt-3 space-y-3 text-slate-700">
+        {suite && <button type="button" disabled={pending} onClick={readVersion} className="text-teal-800 underline">载入所选版本</button>}
+        <label className="block">题集标识
+          <input required maxLength={80} pattern={"[a-z0-9][a-z0-9_\\-]{0,79}"} className={field} value={key} onChange={(event) => setKey(event.target.value)} placeholder="engineering-baseline" />
+        </label>
+        <label className="block">名称
+          <input required maxLength={160} className={field} value={label} onChange={(event) => setLabel(event.target.value)} />
+        </label>
+        <label className="block">说明
+          <input maxLength={2000} className={field} value={description} onChange={(event) => setDescription(event.target.value)} />
+        </label>
+        <label className="block">用例 JSON
+          <textarea required className={`${field} font-mono text-xs`} rows={7} value={source} onChange={(event) => setSource(event.target.value)}
+            placeholder={'[{"id":"case-1","question":"如何恢复备份？","reference":"按运维手册中的恢复步骤执行。","source_file":"ops.md"}]'} />
+        </label>
+        <p className="text-xs text-slate-600">使用相同标识发布会创建下一版本。填写 source_file 可检查知识来源是否已索引。</p>
+        <button type="submit" disabled={pending} className="rounded-md bg-teal-700 px-3 py-1.5 text-white disabled:opacity-50">发布新版本</button>
+        {error && <p role="alert" className="text-rose-700">{error}</p>}
+        {notice && <p role="status" className="text-teal-800">{notice}</p>}
+      </form>
+    </details>
   );
 }
 

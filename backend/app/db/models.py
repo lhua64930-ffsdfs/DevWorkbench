@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, Uuid, func
+from sqlalchemy import JSON, BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -544,6 +544,74 @@ class EvalRun(Base):
     name: Mapped[str] = mapped_column(String(200))
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvalDatasetVersion(Base):
+    __tablename__ = "eval_dataset_versions"
+    __table_args__ = (UniqueConstraint("repo_id", "dataset_key", "version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), index=True)
+    dataset_key: Mapped[str] = mapped_column(String(80))
+    version: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64))
+    cases: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvalCaseCheckpoint(Base):
+    __tablename__ = "eval_case_checkpoints"
+
+    eval_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("eval_runs.id", ondelete="CASCADE"), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+
+
+class EvalTokenBudget(Base):
+    __tablename__ = "eval_token_budgets"
+
+    eval_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("eval_runs.id", ondelete="CASCADE"), primary_key=True)
+    token_limit: Mapped[int] = mapped_column(Integer)
+    committed_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reported_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    blocked: Mapped[bool] = mapped_column(default=False)
+
+
+class KnowledgeSnapshot(Base):
+    __tablename__ = "knowledge_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), index=True)
+    label: Mapped[str] = mapped_column(String(160))
+    sha256: Mapped[str] = mapped_column(String(64))
+    config: Mapped[dict[str, Any]] = mapped_column(JSON)
+    chunk_count: Mapped[int] = mapped_column(Integer)
+    vector_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class KnowledgeSnapshotChunk(Base):
+    __tablename__ = "knowledge_snapshot_chunks"
+
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_snapshots.id", ondelete="CASCADE"), primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), index=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True))
+    source_type: Mapped[str] = mapped_column(String(80))
+    title: Mapped[str] = mapped_column(String(500))
+    content: Mapped[str] = mapped_column(Text)
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON)
+    embedding: Mapped[list[float] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ActiveKnowledgeSnapshot(Base):
+    __tablename__ = "active_knowledge_snapshots"
+
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), primary_key=True)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_snapshots.id"))
 
 
 class ActionDraft(Base):

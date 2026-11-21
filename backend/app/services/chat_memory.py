@@ -15,7 +15,6 @@ from app.db.models import (
     ChatSession as ChatSessionModel,
     Conversation,
     ConversationMemory,
-    Document,
     EvidenceItem,
     Issue,
     PullRequest,
@@ -51,6 +50,7 @@ from app.services.llm.client import LLMClient
 from app.services.memory_hub import capture_memory_candidates, record_recall_event
 from app.services.rag.indexing import CI_LOG_CHUNK_CHARS, sanitize_ci_log
 from app.services.rag.retrieval import search_similar_documents
+from app.services.rag.snapshots import retrieval_documents, selected_snapshot
 from app.services.rag.source_policy import RAG_SOURCE_TYPES
 from app.services.rag.vector_store import MilvusUnavailableError
 
@@ -334,12 +334,10 @@ class EvidenceStore:
                         "secrets_redacted": True,
                     },
                 )
-            for doc in (
-                self.db.query(Document)
-                .filter(Document.repo_id == repo.id, Document.source_type.in_(RAG_SOURCE_TYPES))
-                .all()
-            ):
-                self._add(repo.id, None, doc.source_type, str(doc.source_id), doc.title, doc.content, doc.meta or {})
+            snapshot = selected_snapshot(self.db, repo.id)
+            for doc in retrieval_documents(self.db, repo.id, snapshot):
+                if doc.source_type in RAG_SOURCE_TYPES:
+                    self._add(repo.id, None, doc.source_type, str(doc.source_id), doc.title, doc.content, doc.meta or {})
 
         memories = (
             self.db.query(ConversationMemory).filter(ConversationMemory.conversation_id == conversation_id).all()

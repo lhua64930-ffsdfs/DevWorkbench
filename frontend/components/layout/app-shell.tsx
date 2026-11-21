@@ -3,13 +3,14 @@ import Link from "next/link";
 const navItems = [
   { href: "/", label: "Workspace" },
   { href: "/knowledge", label: "项目知识" },
+  { href: "/data-assets", label: "数据中台" },
   { href: "/rag", label: "RAG 工作室" },
   { href: "/repos", label: "Repos" },
   { href: "/action-drafts", label: "Drafts" },
   { href: "/workflow-runs", label: "Runs" },
   { href: "/workspaces", label: "Reports" },
   { href: "/code-graph", label: "Code Graph" },
-  { href: "/evals", label: "Evals" }
+  { href: "/evals", label: "评测中台" }
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {

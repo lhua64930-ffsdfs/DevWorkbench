@@ -220,6 +220,28 @@ def reset_milvus_store_cache() -> None:
     _milvus_store.cache_clear()
 
 
+def read_snapshot_vectors(repo_id: uuid.UUID, ids: list[uuid.UUID]) -> dict[uuid.UUID, list[float]]:
+    if not ids:
+        return {}
+    store = _milvus_store()
+    vectors = {}
+    try:
+        for start in range(0, len(ids), 100):
+            rows = store.client.get(
+                collection_name=store.collection_name, ids=[str(value) for value in ids[start:start + 100]],
+                output_fields=["repo_id", "document_id", "embedding"], consistency_level="Strong", timeout=20,
+            )
+            for row in rows:
+                if row["repo_id"] != str(repo_id) or len(row["embedding"]) != store.dimensions:
+                    raise ValueError("Snapshot vector contract mismatch")
+                vectors[uuid.UUID(row["document_id"])] = row["embedding"]
+    except Exception as exc:
+        raise MilvusUnavailableError("无法读取快照向量") from exc
+    if set(vectors) != set(ids):
+        raise MilvusUnavailableError("有分块缺少向量，请完成重建后再创建快照")
+    return vectors
+
+
 def milvus_runtime_status() -> dict[str, Any]:
     try:
         store = _milvus_store()

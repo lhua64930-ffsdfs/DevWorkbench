@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Any
 
 import httpx
+from app.services.evals.token_budget import model_sync_client
 
 from app.core.config import settings
 
@@ -116,7 +117,7 @@ def _embed_openai_compatible(
 
     output: list[list[float]] = []
     batch_size = max_batch_size or len(texts) or 1
-    with httpx.Client(timeout=60) as client:
+    with model_sync_client(timeout=60) as client:
         for start in range(0, len(texts), batch_size):
             batch = texts[start : start + batch_size]
             response = client.post(
@@ -201,6 +202,10 @@ def embed_knowledge_texts(
     if not clean_texts:
         return []
     validate_embedding_contract(provider, model, dimensions)
+    return _embed_with_provider(clean_texts, provider, model, dimensions, is_query=is_query)
+
+
+def _embed_with_provider(clean_texts: list[str], provider: str, model: str, dimensions: int, *, is_query: bool) -> list[list[float]]:
     resolved = normalize_embedding_provider(provider)
     if resolved in {"qwen_local", "local"}:
         return _embed_local(clean_texts, dimensions, model_name=model, is_query=is_query)
@@ -228,3 +233,8 @@ def embed_knowledge_query(text: str, *, provider: str, model: str, dimensions: i
         dimensions=dimensions,
         is_query=True,
     )[0]
+
+
+def embed_snapshot_query(text: str, *, provider: str, model: str, dimensions: int) -> list[float]:
+    # Snapshot vectors are isolated from the live Milvus collection.
+    return _embed_with_provider([text], provider, model, dimensions, is_query=True)[0]

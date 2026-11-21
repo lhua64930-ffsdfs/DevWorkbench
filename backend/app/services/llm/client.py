@@ -7,6 +7,7 @@ import httpx
 from app.core.config import settings
 from app.core.production import validate_outbound_url
 from app.services.context_compression import prompt_cache_model_kwargs
+from app.services.evals.token_budget import model_async_client
 
 
 class LLMClient:
@@ -29,7 +30,7 @@ class LLMClient:
             "max_tokens": settings.context_reserved_response_tokens,
         }
         payload.update(prompt_cache_model_kwargs())
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with model_async_client(timeout=60) as client:
             try:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
@@ -55,7 +56,7 @@ class LLMClient:
         }
         payload["max_tokens"] = settings.context_reserved_response_tokens
         payload.update(prompt_cache_model_kwargs())
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with model_async_client(timeout=60) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -75,7 +76,7 @@ class LLMClient:
         payload: dict[str, Any] = {"model": self.model, "messages": payload_messages, "stream": True}
         payload["max_tokens"] = settings.context_reserved_response_tokens
         payload.update(prompt_cache_model_kwargs())
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with model_async_client(timeout=60) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/chat/completions",

@@ -30,7 +30,8 @@ def is_ai_request(method: str, path: str) -> bool:
     if method != "POST" or path.startswith("/api/chat/feedback"):
         return False
     return bool(
-        path.startswith(("/api/chat", "/api/evals", "/api/reports"))
+        path.startswith(("/api/chat", "/api/reports"))
+        or path.startswith("/api/evals") and not path.startswith("/api/evals/datasets/")
         or path == "/api/workspaces/multi-repo-report"
         or re.search(r"/analyze(?:/stream)?$", path)
         or path.endswith(("/ask", "/search", "/retrieval-tests", "/review-checklist", "/knowledge/upload", "/knowledge/notes", "/reindex"))

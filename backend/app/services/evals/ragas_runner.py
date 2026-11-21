@@ -1,4 +1,5 @@
 import asyncio
+from app.services.evals.token_budget import budget_active, model_async_client
 import copy
 import importlib.metadata
 import inspect
@@ -189,7 +190,10 @@ class RagasCollectionsScorer:
             raise RagasUnavailableError("RAGAS judge base URL or model is not configured")
 
         try:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=settings.ragas_timeout_seconds)
+            budget_options = {
+                "http_client": model_async_client(timeout=settings.ragas_timeout_seconds), "max_retries": 0,
+            } if budget_active() else {}
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=settings.ragas_timeout_seconds, **budget_options)
             llm = llm_factory(
                 model,
                 client=client,

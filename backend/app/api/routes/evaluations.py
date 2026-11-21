@@ -3,28 +3,46 @@ import asyncio
 import hashlib
 import json
 import logging
+from contextlib import ExitStack
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from app.core.config import settings
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import ActionDraft, EvalRun, Repository, User
+from app.db.models import ActionDraft, EvalCaseCheckpoint, EvalDatasetVersion, EvalRun, EvalTokenBudget, KnowledgeSnapshot, Repository, User
 from app.db.session import SessionLocal, get_db
-from app.schemas.evals import EvalIssueDraftRequest, EvalRunRequest, EvalRunResponse
+from app.schemas.evals import EvalDatasetPublishRequest, EvalIssueDraftRequest, EvalRunRequest, EvalRunResponse, RagEvalCaseRequest
 from app.services.evals.ragas_runner import (
     REQUIRED_RAGAS_METRICS,
     RagEvalCase,
     rescore_rag_result,
     run_rag_quality_eval,
 )
-from app.services.evals.suites import AUTO_SMOKE_SUITE_ID, list_eval_suites, load_eval_suite
+from app.services.evals.suites import AUTO_SMOKE_SUITE_ID, document_ids_by_filename, list_eval_suites, load_eval_suite
 from app.services.evals.runner import run_basic_eval
+from app.services.evals.release_gate import application_digest, gate_decision
+from app.services.evals.token_budget import TokenBudget, TokenBudgetExceeded, evaluation_budget
 from app.services.permissions import require_permission, write_audit_log
+from app.services.rag.snapshots import pin_snapshot, selected_snapshot
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+DATASET_PREFIX = "dataset:"
+
+
+@router.get("/config")
+def get_eval_config(_user=Depends(require_permission("eval:read"))) -> dict:
+    return {
+        "max_cases": settings.max_eval_cases,
+        "max_tokens": settings.max_eval_tokens,
+        "answer_model": settings.llm_model,
+        "judge_model": settings.ragas_judge_model or settings.llm_model,
+    }
 
 
 def _request_case(item) -> RagEvalCase:
@@ -58,16 +76,113 @@ def _custom_evaluation_set(payload: EvalRunRequest) -> dict:
     }
 
 
+def _published_suite(
+    db: Session, row: EvalDatasetVersion, source_ids: dict[str, list[str]] | None = None,
+) -> tuple[dict, list[RagEvalCase]]:
+    cases = []
+    missing_sources = set()
+    for item in row.cases:
+        case = _request_case(RagEvalCaseRequest.model_validate(item))
+        if case.source_file:
+            if source_ids is None:
+                source_ids = document_ids_by_filename(db, row.repo_id)
+            documents = source_ids.get(Path(case.source_file).name.casefold(), [])
+            if not documents:
+                missing_sources.add(case.source_file)
+            case.expected_source_ids = list(dict.fromkeys([
+                *case.expected_source_ids,
+                *documents,
+            ]))
+        cases.append(case)
+    return {
+        "id": f"{DATASET_PREFIX}{row.id}", "name": row.dataset_key, "label": f"{row.label} · v{row.version}",
+        "description": row.description, "schema_version": 1, "version": row.version,
+        "case_count": len(cases), "sha256": row.sha256, "source": "published",
+        "missing_sources": sorted(missing_sources), "ready": not missing_sources, "recommended": False,
+    }, cases
+
+
+@router.post("/datasets/{repo_id}/publish", status_code=201)
+def publish_dataset(
+    repo_id: UUID,
+    payload: EvalDatasetPublishRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("repo:sync")),
+) -> dict:
+    if db.get(Repository, repo_id) is None:
+        raise HTTPException(404, "未找到仓库")
+    label = payload.label.strip()
+    if not label:
+        raise HTTPException(422, "评测集名称不能为空")
+    cases = []
+    seen = set()
+    for index, item in enumerate(payload.cases, start=1):
+        case_id = item.id.strip() or f"case-{index}"
+        question, reference = item.question.strip(), item.reference.strip()
+        if case_id in seen or len(case_id) > 100 or not question or not reference:
+            raise HTTPException(422, f"第 {index} 题需要唯一且不超过 100 字符的 ID、问题和参考答案")
+        seen.add(case_id)
+        cases.append({
+            **item.model_dump(mode="json"), "id": case_id, "question": question, "reference": reference,
+            "source_file": (item.source_file or "").strip() or None,
+        })
+    version = db.scalar(select(func.max(EvalDatasetVersion.version)).where(
+        EvalDatasetVersion.repo_id == repo_id, EvalDatasetVersion.dataset_key == payload.dataset_key,
+    ))
+    row = EvalDatasetVersion(
+        repo_id=repo_id, dataset_key=payload.dataset_key, version=(version or 0) + 1, label=label,
+        description=payload.description.strip(), cases=cases,
+        sha256=hashlib.sha256(json.dumps(cases, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    )
+    try:
+        db.add(row)
+        db.flush()
+        write_audit_log(
+            db, user=user, repo_id=repo_id, action="eval_dataset.publish",
+            target_type="eval_dataset_version", target_id=str(row.id), result_json={"sha256": row.sha256},
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "评测集版本已被其他请求发布，请刷新后重试") from exc
+    return _published_suite(db, row)[0]
+
+
+@router.get("/datasets/{repo_id}/{dataset_id}")
+def dataset_version(
+    repo_id: UUID,
+    dataset_id: UUID,
+    db: Session = Depends(get_db),
+    _user=Depends(require_permission("eval:read")),
+) -> dict:
+    row = db.get(EvalDatasetVersion, dataset_id)
+    if row is None or row.repo_id != repo_id:
+        raise HTTPException(404, "未找到评测集版本")
+    return {"suite": _published_suite(db, row)[0], "cases": row.cases}
+
+
 @router.get("/suites")
 async def get_eval_suites(
     repo_id: UUID = Query(...),
+    snapshot_id: UUID | None = None,
     db: Session = Depends(get_db),
     _user=Depends(require_permission("eval:read")),
 ) -> list[dict]:
+    snapshot = db.get(KnowledgeSnapshot, snapshot_id) if snapshot_id else None
+    if snapshot_id and (snapshot is None or snapshot.repo_id != repo_id):
+        raise HTTPException(404, "未找到知识快照")
+    if snapshot is None:
+        snapshot = selected_snapshot(db, repo_id)
     try:
-        return list_eval_suites(db, repo_id)
+        suites = list_eval_suites(db, repo_id, snapshot=snapshot)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    versions = db.scalars(select(EvalDatasetVersion).where(EvalDatasetVersion.repo_id == repo_id)
+                          .order_by(EvalDatasetVersion.created_at.desc(), EvalDatasetVersion.version.desc())).all()
+    source_ids = document_ids_by_filename(db, repo_id, snapshot) if any(
+        item.get("source_file") for row in versions for item in row.cases
+    ) else {}
+    return [_published_suite(db, row, source_ids)[0] for row in versions] + suites
 
 
 @router.post("/run", response_model=EvalRunResponse)
@@ -101,12 +216,32 @@ async def run_rag_eval(
         raise HTTPException(status_code=404, detail="未找到仓库")
     if payload.cases is not None and payload.suite_id:
         raise HTTPException(status_code=400, detail="cases 与 suite_id 不能同时提交")
+    if payload.snapshot_id:
+        snapshot = db.get(KnowledgeSnapshot, payload.snapshot_id)
+        if snapshot is None or snapshot.repo_id != payload.repo_id:
+            raise HTTPException(404, "未找到知识快照")
+    else:
+        snapshot = selected_snapshot(db, payload.repo_id)
     if payload.cases is not None:
         cases = [_request_case(item) for item in payload.cases]
         evaluation_set = _custom_evaluation_set(payload)
+    elif payload.suite_id and payload.suite_id.startswith(DATASET_PREFIX):
+        try:
+            dataset_id = UUID(payload.suite_id.removeprefix(DATASET_PREFIX))
+        except ValueError as exc:
+            raise HTTPException(400, "评测集版本 ID 无效") from exc
+        row = db.get(EvalDatasetVersion, dataset_id)
+        if row is None or row.repo_id != payload.repo_id:
+            raise HTTPException(404, "未找到评测集版本")
+        source_ids = document_ids_by_filename(db, payload.repo_id, snapshot) if snapshot else None
+        evaluation_set, cases = _published_suite(db, row, source_ids)
+        if not evaluation_set["ready"]:
+            raise HTTPException(422, "评测集缺少已索引来源：" + "、".join(evaluation_set["missing_sources"]))
+        if payload.case_budget is None:
+            raise HTTPException(422, "请为版本化评测设置用例预算")
     elif payload.suite_id:
         try:
-            suite = load_eval_suite(db, payload.repo_id, payload.suite_id)
+            suite = load_eval_suite(db, payload.repo_id, payload.suite_id, snapshot=snapshot)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         cases = None if payload.suite_id == AUTO_SMOKE_SUITE_ID else suite.cases
@@ -124,6 +259,28 @@ async def run_rag_eval(
         }
     if cases is not None and len(cases) > settings.max_eval_cases:
         raise HTTPException(status_code=422, detail="评测用例数量超出单任务限制")
+    if payload.token_budget is not None and payload.token_budget > settings.max_eval_tokens:
+        raise HTTPException(422, f"Token 预算不能超过 {settings.max_eval_tokens}")
+    if payload.token_budget is not None and db.get_bind().dialect.name != "postgresql" and any((
+        settings.llm_api_key, settings.ragas_judge_api_key, settings.dashscope_api_key, settings.embedding_api_key,
+        settings.rerank_api_key,
+    )):
+        raise HTTPException(422, "真实模型的 Token 预算评测需要 PostgreSQL")
+    if snapshot:
+        evaluation_set["snapshot"] = {"id": str(snapshot.id), "sha256": snapshot.sha256, "label": snapshot.label}
+    evaluation_set["code_sha256"] = application_digest()
+    if payload.case_budget is not None or payload.token_budget is not None:
+        if not cases or any(not item.id.strip() or len(item.id) > 100 for item in cases) or len({item.id for item in cases}) != len(cases):
+            raise HTTPException(422, "预算评测需要非空固定题集和唯一且不超过 100 字符的用例 ID")
+        if payload.case_budget is not None and len(cases) > payload.case_budget:
+            raise HTTPException(422, f"评测集有 {len(cases)} 题，超出 {payload.case_budget} 题预算")
+        evaluation_set["case_budget"] = payload.case_budget or len(cases)
+        evaluation_set["token_budget"] = payload.token_budget
+        evaluation_set["execution_config"] = {
+            "answer_model": settings.llm_model,
+            "judge_model": (settings.ragas_judge_model or settings.llm_model) if payload.run_judge else None,
+            "top_k": payload.top_k,
+        }
     result = _job_result(
         status="queued",
         stage="queued",
@@ -134,6 +291,8 @@ async def run_rag_eval(
     eval_run = EvalRun(name=payload.name or "rag_eval", result_json=result)
     db.add(eval_run)
     db.flush()
+    if payload.token_budget is not None:
+        db.add(EvalTokenBudget(eval_id=eval_run.id, token_limit=payload.token_budget))
     db.refresh(eval_run)
     schedule_job(db, background_tasks,
         _execute_rag_eval_job,
@@ -159,8 +318,25 @@ async def _execute_rag_eval_job(
     # Yield once after Starlette sends the queued response so the client receives
     # the Eval ID before imports, index loading, or model setup can block the loop.
     await asyncio.sleep(0)
+    tracked = evaluation_set.get("case_budget") is not None
+    eval_uuid = UUID(eval_id)
+    completed_rows: dict[str, dict] = {}
+    budget = TokenBudget(eval_uuid) if evaluation_set.get("token_budget") is not None else None
+
+    def save_case(row: dict) -> None:
+        checkpoint = db.get(EvalCaseCheckpoint, (eval_uuid, row["id"]))
+        checkpoint.result = row
+        db.commit()
+        completed_rows[row["id"]] = row
 
     async def persist_progress(progress: dict) -> None:
+        if budget and budget.summary()["blocked"]:
+            raise TokenBudgetExceeded("Token 预算不足，已停止评测")
+        if tracked and progress.get("stage") == "chatagent":
+            case_id = progress["case_id"]
+            if db.get(EvalCaseCheckpoint, (eval_uuid, case_id)) is not None:
+                raise RuntimeError(f"第 {case_id} 题上一次执行中断，已保留其预算记录")
+            db.add(EvalCaseCheckpoint(eval_id=eval_uuid, case_id=case_id))
         eval_run = db.get(EvalRun, UUID(eval_id))
         if eval_run is None:
             return
@@ -180,27 +356,49 @@ async def _execute_rag_eval_job(
         db.commit()
 
     try:
+        if evaluation_set.get("code_sha256") and evaluation_set["code_sha256"] != application_digest():
+            raise RuntimeError("运行代码版本已经变化，请重新提交评测")
+        if tracked:
+            previous = db.get(EvalRun, eval_uuid)
+            if previous is None or previous.result_json.get("status") not in {"queued", "running"}:
+                db.close()
+                return
+            checkpoints = db.scalars(select(EvalCaseCheckpoint).where(EvalCaseCheckpoint.eval_id == eval_uuid))
+            completed_rows = {row.case_id: row.result for row in checkpoints if row.result is not None}
+            expected = evaluation_set.get("execution_config")
+            if expected is not None and expected != {
+                "answer_model": settings.llm_model,
+                "judge_model": (settings.ragas_judge_model or settings.llm_model) if run_judge else None,
+                "top_k": limit,
+            }:
+                raise RuntimeError("模型或检索配置已变化，请重新提交评测")
         await persist_progress({"stage": "starting", "message": "后台任务已启动，正在加载仓库上下文。"})
-        result = await run_rag_quality_eval(
-            db,
-            repo_id,
-            cases=cases,
-            limit=limit,
-            run_judge=run_judge,
-            progress_callback=persist_progress,
-            evaluation_set=evaluation_set,
-        )
+        with ExitStack() as stack:
+            stack.enter_context(evaluation_budget(budget))
+            if evaluation_set.get("snapshot"):
+                stack.enter_context(pin_snapshot(UUID(repo_id), UUID(evaluation_set["snapshot"]["id"])))
+            result = await run_rag_quality_eval(
+                db, repo_id, cases=cases, limit=limit, run_judge=run_judge,
+                progress_callback=persist_progress, evaluation_set=evaluation_set,
+                resume_rows=completed_rows if tracked else None, case_callback=save_case if tracked else None,
+            )
         result["progress"] = {
             "stage": "completed",
             "message": "评测已完成。",
             "updated_at": datetime.now(UTC).isoformat(),
         }
     except Exception as exc:
-        logger.exception("RAGAS background evaluation failed: eval_id=%s", eval_id)
+        db.rollback()
+        blocked = budget is not None and budget.summary()["blocked"]
+        failure = "Token 预算不足，已拦截模型请求并保留已完成用例" if blocked else str(exc)
+        if blocked:
+            logger.info("Evaluation stopped at its token budget: eval_id=%s", eval_id)
+        else:
+            logger.exception("RAGAS background evaluation failed: eval_id=%s", eval_id)
         result = _job_result(
             status="error",
-            stage="error",
-            message=f"评测运行失败：{exc}",
+            stage="budget_exhausted" if blocked else "error",
+            message=failure,
             repo_id=repo_id,
             evaluation_set=evaluation_set,
         )
@@ -211,14 +409,16 @@ async def _execute_rag_eval_job(
                     "requested": run_judge,
                     "available": False,
                     "passed": None,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": failure,
                     "metrics": {},
                 },
-                "cases": [],
+                "cases": list(completed_rows.values()),
             }
         )
 
     try:
+        if budget:
+            result["token_budget"] = budget.summary()
         eval_run = db.get(EvalRun, UUID(eval_id))
         if eval_run is not None:
             eval_run.result_json = result
@@ -290,6 +490,9 @@ async def rescore_eval(
     target = EvalRun(name=f"rescore-{source.name}", result_json=queued)
     db.add(target)
     db.flush()
+    if evaluation_set.get("token_budget") is not None:
+        evaluation_set["token_budget"] = min(evaluation_set["token_budget"], settings.max_eval_tokens)
+        db.add(EvalTokenBudget(eval_id=target.id, token_limit=evaluation_set["token_budget"]))
     db.refresh(target)
     schedule_job(db, background_tasks,
         _execute_rescore_job,
@@ -312,7 +515,11 @@ async def _execute_rescore_job(
     db = SessionLocal()
     await asyncio.sleep(0)
 
+    budget = TokenBudget(UUID(target_eval_id)) if evaluation_set.get("token_budget") is not None else None
+
     async def persist_progress(progress: dict) -> None:
+        if budget and budget.summary()["blocked"]:
+            raise TokenBudgetExceeded("Token 预算不足，已停止重评分")
         row = db.get(EvalRun, UUID(target_eval_id))
         if row is None:
             return
@@ -329,22 +536,28 @@ async def _execute_rescore_job(
         db.commit()
 
     try:
-        result = await rescore_rag_result(
-            source_result,
-            eval_id=source_eval_id,
-            progress_callback=persist_progress,
-        )
+        with evaluation_budget(budget):
+            result = await rescore_rag_result(
+                source_result, eval_id=source_eval_id, progress_callback=persist_progress,
+            )
+        result["evaluation_set"] = evaluation_set
         result["progress"] = {
             "stage": "completed",
             "message": "异常指标重评分已完成；ChatAgent 回答和检索现场均未重新运行。",
             "updated_at": datetime.now(UTC).isoformat(),
         }
     except Exception as exc:
-        logger.exception("RAGAS rescore failed: eval_id=%s", target_eval_id)
+        db.rollback()
+        blocked = budget is not None and budget.summary()["blocked"]
+        failure = "Token 预算不足，已停止重评分" if blocked else str(exc)
+        if blocked:
+            logger.info("Rescore stopped at its token budget: eval_id=%s", target_eval_id)
+        else:
+            logger.exception("RAGAS rescore failed: eval_id=%s", target_eval_id)
         result = _job_result(
             status="error",
-            stage="error",
-            message=f"重评分失败：{exc}",
+            stage="budget_exhausted" if blocked else "error",
+            message=failure,
             repo_id=repo_id or None,
             evaluation_set=evaluation_set,
             rescore_of=source_eval_id,
@@ -354,11 +567,13 @@ async def _execute_rescore_job(
             "available": False,
             "complete": False,
             "passed": None,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": failure,
             "metrics": {},
         }
         result["cases"] = source_result.get("cases") or []
     try:
+        if budget:
+            result["token_budget"] = budget.summary()
         row = db.get(EvalRun, UUID(target_eval_id))
         if row is not None:
             row.result_json = result
@@ -374,6 +589,8 @@ def _eval_comparison(base: EvalRun, candidate: EvalRun) -> dict:
     base_set = base_result.get("evaluation_set") or {}
     candidate_set = candidate_result.get("evaluation_set") or {}
     reasons: list[str] = []
+    if (base_result.get("target") or {}).get("repo_id") != (candidate_result.get("target") or {}).get("repo_id"):
+        reasons.append("评测仓库不一致")
     if base_set.get("sha256") != candidate_set.get("sha256"):
         reasons.append("评测集 Hash 不一致")
     if (base_result.get("ragas") or {}).get("version") != (candidate_result.get("ragas") or {}).get("version"):
@@ -509,6 +726,11 @@ async def create_eval_issue_draft(
     if eval_run is None:
         raise HTTPException(status_code=404, detail="未找到 Eval run")
     result = eval_run.result_json or {}
+    if budget := db.get(EvalTokenBudget, eval_uuid):
+        result = {**result, "token_budget": {
+            "limit": budget.token_limit, "committed": budget.committed_tokens,
+            "reported": budget.reported_tokens, "blocked": budget.blocked,
+        }}
     repo_id = (result.get("target") or {}).get("repo_id")
     if not repo_id:
         raise HTTPException(status_code=400, detail="该历史评测没有保存仓库信息，无法创建 Issue 草稿")
@@ -549,14 +771,10 @@ async def list_evals(
     db: Session = Depends(get_db),
     _user=Depends(require_permission("eval:read")),
 ) -> list[dict]:
-    rows = db.query(EvalRun).order_by(EvalRun.created_at.desc()).limit(100).all()
+    runs = select(EvalRun)
     if repo_id is not None:
-        rows = [
-            row
-            for row in rows
-            if str(((row.result_json or {}).get("target") or {}).get("repo_id") or "") == str(repo_id)
-        ]
-    rows = rows[: max(1, min(limit, 100))]
+        runs = runs.where(EvalRun.result_json["target"]["repo_id"].as_string() == str(repo_id))
+    rows = db.scalars(runs.order_by(EvalRun.created_at.desc(), EvalRun.id).limit(max(1, min(limit, 100))))
     return [
         {
             "eval_id": str(row.id),
@@ -590,6 +808,20 @@ async def get_eval(
         "status": str(result.get("status") or "completed"),
         "result": result,
     }
+
+
+@router.get("/{eval_id}/release-gate")
+def get_release_gate(
+    eval_id: UUID, snapshot_id: UUID | None = None, db: Session = Depends(get_db),
+    _user=Depends(require_permission("eval:read")),
+) -> dict:
+    run = db.get(EvalRun, eval_id)
+    if run is None:
+        raise HTTPException(404, "未找到评测")
+    snapshot = db.get(KnowledgeSnapshot, snapshot_id) if snapshot_id else None
+    if snapshot_id and snapshot is None:
+        raise HTTPException(404, "未找到知识快照")
+    return gate_decision(db, run, snapshot=snapshot)
 
 
 def _summary_metrics(result: dict) -> dict[str, float]:

@@ -115,6 +115,7 @@ DevWorkbench 是一个面向软件研发团队的全栈 AI Agent 工程项目。
 | [系统设计](docs/architecture/system_design.md) | 服务关系、证据边界和关键取舍 |
 | [Agent 工作流](docs/architecture/agent_workflow.md) | 工具调用、任务依赖、观察与综合 |
 | [RAG 与评测](docs/rag_and_evaluation.md) | 文档处理、检索、固定基线与质量门槛 |
+| [数据中台与评测中台](docs/data_and_eval_centers.md) | 仓库数据目录、题集版本发布与评测用例预算 |
 | [数据模型](docs/architecture/database_schema.md) | 核心实体与存储职责 |
 | [安全设计](docs/architecture/security.md) | 身份、仓库隔离、草稿执行与配置边界 |
 | [CI 复现沙盒](docs/ci_sandbox.md) | Docker 镜像、启用步骤、复现结果与执行边界 |

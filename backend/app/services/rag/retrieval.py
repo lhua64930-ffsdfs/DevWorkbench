@@ -9,13 +9,16 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Document
+from app.db.models import Document, KnowledgeSnapshot, KnowledgeSnapshotChunk
 from app.services.context_compression import compress_retrieval_results
+from app.services.rag.embeddings import embed_snapshot_query
 from app.services.rag.rerank import rerank_documents
+from app.services.rag.snapshots import retrieval_documents, selected_snapshot
 from app.services.rag.source_policy import RAG_SOURCE_TYPES, is_searchable_source, normalize_source_types
 from app.services.rag.vector_store import MilvusUnavailableError, search_milvus_documents
 
 
+_CURRENT_SNAPSHOT = object()
 BM25_K1 = 1.5
 BM25_B = 0.75
 VECTOR_FUSION_WEIGHT = 0.62
@@ -157,8 +160,9 @@ def _milvus_vector_candidates(
     fetch_limit: int,
     metadata_filters: dict | None,
     query_embedding: list[float] | None = None,
+    snapshot_results: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    milvus_results = search_milvus_documents(
+    vector_results = snapshot_results if snapshot_results is not None else search_milvus_documents(
         repo_id,
         query,
         source_type=source_types[0] if len(source_types) == 1 else None,
@@ -167,7 +171,7 @@ def _milvus_vector_candidates(
         query_embedding=query_embedding,
     )
     candidates = []
-    for item in milvus_results:
+    for item in vector_results:
         if not _matches_metadata(item.get("metadata") or {}, metadata_filters):
             continue
         score = max(0.0, float(item.get("score") or 0.0))
@@ -181,7 +185,7 @@ def _milvus_vector_candidates(
                 "retrieval": {
                     "sources": ["vector"],
                     "vector_score_raw": score,
-                    "vector_backend": "milvus",
+                    "vector_backend": "snapshot" if snapshot_results is not None else "milvus",
                 },
             }
         )
@@ -245,17 +249,16 @@ def _keyword_candidates(
     source_types: list[str],
     fetch_limit: int,
     metadata_filters: dict | None,
+    snapshot: KnowledgeSnapshot | None = None,
 ) -> list[dict[str, Any]]:
     terms = list(dict.fromkeys(_tokens(query)))
     if not terms:
         return []
-    q = db.query(Document).filter(
-        Document.repo_id == _as_uuid(repo_id),
-        Document.source_type.in_(source_types),
-    )
+    model = KnowledgeSnapshotChunk if snapshot else Document
+    q = retrieval_documents(db, _as_uuid(repo_id), snapshot).filter(model.source_type.in_(source_types))
     state = (metadata_filters or {}).get("state")
     if state:
-        q = q.filter(Document.meta["state"].as_string() == str(state))
+        q = q.filter(model.meta["state"].as_string() == str(state))
 
     corpus: list[dict[str, Any]] = []
     document_frequency: Counter[str] = Counter()
@@ -467,6 +470,7 @@ def expand_parent_context(
     items: list[dict[str, Any]],
     *,
     neighbor_window: int = 1,
+    snapshot=_CURRENT_SNAPSHOT,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     # Fetch each source once for the entire candidate batch, not once per hit.
     source_ids = set()
@@ -478,7 +482,10 @@ def expand_parent_context(
             pass
     siblings_by_source = {}
     if source_ids:
-        rows = db.query(Document).filter(Document.repo_id == _as_uuid(repo_id), Document.source_id.in_(source_ids)).all()
+        if snapshot is _CURRENT_SNAPSHOT:
+            snapshot = selected_snapshot(db, repo_id)
+        model = KnowledgeSnapshotChunk if snapshot else Document
+        rows = retrieval_documents(db, _as_uuid(repo_id), snapshot).filter(model.source_id.in_(source_ids)).all()
         for row in rows:
             siblings_by_source.setdefault((row.source_type, row.source_id), []).append(row)
     expanded: list[dict[str, Any]] = []
@@ -562,6 +569,28 @@ def expand_parent_context(
     }
 
 
+def _snapshot_vectors(db, snapshot, query, source_types, query_embedding, limit):
+    if not snapshot.vector_count:
+        return []
+    config = snapshot.config
+    vector = query_embedding or embed_snapshot_query(
+        query, provider=config["embedding_provider"], model=config["embedding_model"],
+        dimensions=config["embedding_dimensions"],
+    )
+    if len(vector) != config["embedding_dimensions"]:
+        raise ValueError("知识快照的查询向量维度不一致")
+    model = KnowledgeSnapshotChunk
+    rows = db.query(model).filter(
+        model.repo_id == snapshot.repo_id, model.snapshot_id == snapshot.id,
+        model.source_type.in_(source_types), model.embedding.is_not(None),
+    ).yield_per(100)
+    ranked = heapq.nlargest(
+        limit, ((cosine_similarity(vector, row.embedding), str(row.id), row) for row in rows),
+        key=lambda item: (item[0], item[1]),
+    )
+    return [_document_result(row, score, "vector", "vector_score") for score, _, row in ranked]
+
+
 def search_similar_documents(
     db: Session,
     repo_id: str | uuid.UUID,
@@ -575,7 +604,10 @@ def search_similar_documents(
     apply_compression: bool = True,
     source_types: list[str] | None = None,
     pipeline_trace: dict[str, Any] | None = None,
+    snapshot=_CURRENT_SNAPSHOT,
 ) -> list[dict]:
+    if snapshot is _CURRENT_SNAPSHOT:
+        snapshot = selected_snapshot(db, repo_id)
     requested_types = normalize_source_types([source_type, *(source_types or [])]) or sorted(RAG_SOURCE_TYPES)
     searchable_types = list(dict.fromkeys(item for item in requested_types if is_searchable_source(item)))
     if not searchable_types:
@@ -590,6 +622,9 @@ def search_similar_documents(
     vector_status = "skipped"
     if method in {"vector", "hybrid"} and vector_types:
         try:
+            snapshot_results = None if snapshot is None else _snapshot_vectors(
+                db, snapshot, query, vector_types, query_embedding, fetch_limit,
+            )
             vector_candidates = _milvus_vector_candidates(
                 repo_id,
                 query,
@@ -597,8 +632,11 @@ def search_similar_documents(
                 fetch_limit,
                 metadata_filters,
                 query_embedding=query_embedding,
+                snapshot_results=snapshot_results,
             )
-            vector_status = "success"
+            vector_status = "unavailable" if snapshot is not None and not snapshot.vector_count else "success"
+            if vector_status == "unavailable" and method == "vector":
+                raise MilvusUnavailableError("知识快照没有向量索引")
         except MilvusUnavailableError:
             vector_status = "unavailable"
             if method == "vector":
@@ -608,7 +646,7 @@ def search_similar_documents(
             "name": "vector_recall",
             "status": vector_status,
             "candidate_count": len(vector_candidates),
-            "backend": "milvus",
+            "backend": "snapshot" if snapshot else "milvus",
         }
     )
     keyword_types = searchable_types if method in {"fulltext", "hybrid"} else []
@@ -620,6 +658,7 @@ def search_similar_documents(
             keyword_types,
             fetch_limit,
             metadata_filters,
+            snapshot,
         )
     stages.append(
         {
@@ -674,6 +713,7 @@ def search_similar_documents(
                 "retrieval_method": method,
                 "fusion_method": "weighted" if method == "hybrid" else method,
                 "stages": stages,
+                "snapshot_id": str(snapshot.id) if snapshot else None,
             }
         )
     if not apply_compression:

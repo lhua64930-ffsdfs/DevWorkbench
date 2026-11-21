@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, To
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from app.services.evals.token_budget import budget_active, model_async_client
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import settings
@@ -58,6 +59,7 @@ class ChatAgent(BaseAgent):
     def __init__(self, model: ChatOpenAI | None = None) -> None:
         self.model = model
         if self.model is None and settings.llm_api_key:
+            budget_options = {"http_async_client": model_async_client(timeout=60), "max_retries": 0} if budget_active() else {}
             self.model = ChatOpenAI(
                 model=settings.llm_model,
                 api_key=settings.llm_api_key,
@@ -66,6 +68,7 @@ class ChatAgent(BaseAgent):
                 max_tokens=settings.context_reserved_response_tokens,
                 timeout=60,
                 model_kwargs=prompt_cache_model_kwargs(),
+                **budget_options,
             )
 
     async def run(self, input_data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:

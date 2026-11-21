@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     ai_global_requests_per_hour: int = Field(default=300, ge=1)
     max_document_chunks: int = Field(default=500, ge=1, le=5000)
     max_eval_cases: int = Field(default=20, ge=1, le=100)
+    max_eval_tokens: int = Field(default=1_000_000, ge=1, le=10_000_000)
+    max_snapshot_chunks: int = Field(default=2000, ge=1, le=10000)
+    max_knowledge_snapshots: int = Field(default=10, ge=1, le=100)
+    release_gate_eval_id: str = ""
+    release_gate_required: bool = False
     ai_concurrent_requests: int = Field(default=2, ge=1, le=32)
     request_timeout_seconds: int = Field(default=600, ge=10, le=3600)
     token_encryption_previous_keys: str = ""

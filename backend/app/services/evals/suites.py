@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Document, Repository
+from app.db.models import Document, KnowledgeSnapshot, KnowledgeSnapshotChunk, Repository
 from app.services.evals.ragas_runner import RagEvalCase
 
 
@@ -34,15 +35,16 @@ def _read_suite(path: Path) -> tuple[dict[str, Any], str]:
     return payload, hashlib.sha256(raw).hexdigest()
 
 
-def _matching_documents(db: Session, repo_id: Any, source_file: str) -> list[Document]:
-    expected = Path(source_file).name.casefold()
+def document_ids_by_filename(db: Session, repo_id: Any, snapshot: KnowledgeSnapshot | None = None) -> dict[str, list[str]]:
+    model = KnowledgeSnapshotChunk if snapshot else Document
     documents = (
-        db.query(Document)
-        .filter(Document.repo_id == repo_id)
-        .order_by(Document.created_at.asc())
-        .all()
+        db.query(model.id, model.source_id, model.meta)
+        .filter(model.repo_id == repo_id)
+        .order_by(model.created_at.asc())
     )
-    matches: list[Document] = []
+    if snapshot:
+        documents = documents.filter(model.snapshot_id == snapshot.id)
+    matches: dict[str, list[str]] = defaultdict(list)
     for document in documents:
         metadata = document.meta or {}
         candidates = {
@@ -50,9 +52,9 @@ def _matching_documents(db: Session, repo_id: Any, source_file: str) -> list[Doc
             Path(str(metadata.get("display_title") or "")).name.casefold(),
             Path(str(metadata.get("source_file") or "")).name.casefold(),
         }
-        if expected in candidates:
-            matches.append(document)
-    return matches
+        for filename in candidates - {""}:
+            matches[filename].extend(str(value) for value in (document.id, document.source_id) if value)
+    return {filename: list(dict.fromkeys(ids)) for filename, ids in matches.items()}
 
 
 def _suite_applies_to_repo(payload: dict[str, Any], repo: Repository) -> bool:
@@ -64,8 +66,7 @@ def _suite_applies_to_repo(payload: dict[str, Any], repo: Repository) -> bool:
 
 
 def _suite_metadata(
-    db: Session,
-    repo: Repository,
+    source_ids: dict[str, list[str]],
     path: Path,
     payload: dict[str, Any],
     sha256: str,
@@ -73,7 +74,7 @@ def _suite_metadata(
     missing_sources: list[str] = []
     for item in payload["cases"]:
         source_file = str(item.get("source_file") or "").strip()
-        if source_file and not _matching_documents(db, repo.id, source_file):
+        if source_file and not source_ids.get(Path(source_file).name.casefold()):
             missing_sources.append(source_file)
     missing_sources = list(dict.fromkeys(missing_sources))
     return {
@@ -97,16 +98,20 @@ def list_eval_suites(
     repo_id: Any,
     *,
     suite_dir: Path = DEFAULT_SUITE_DIR,
+    snapshot: KnowledgeSnapshot | None = None,
 ) -> list[dict[str, Any]]:
     repo = db.get(Repository, repo_id)
     if repo is None:
         raise ValueError(f"Repository {repo_id} was not found")
     suites: list[dict[str, Any]] = []
+    source_ids = None
     if suite_dir.is_dir():
         for path in sorted(suite_dir.glob("*.json")):
             payload, sha256 = _read_suite(path)
             if _suite_applies_to_repo(payload, repo):
-                suites.append(_suite_metadata(db, repo, path, payload, sha256))
+                if source_ids is None:
+                    source_ids = document_ids_by_filename(db, repo.id, snapshot)
+                suites.append(_suite_metadata(source_ids, path, payload, sha256))
     suites.sort(key=lambda item: (not item["recommended"], not item["ready"], item["label"]))
     suites.append(
         {
@@ -133,6 +138,7 @@ def load_eval_suite(
     suite_id: str,
     *,
     suite_dir: Path = DEFAULT_SUITE_DIR,
+    snapshot: KnowledgeSnapshot | None = None,
 ) -> LoadedEvalSuite:
     if suite_id == AUTO_SMOKE_SUITE_ID:
         return LoadedEvalSuite(
@@ -155,7 +161,8 @@ def load_eval_suite(
         payload, sha256 = _read_suite(path)
         if str(payload["name"]) != suite_id or not _suite_applies_to_repo(payload, repo):
             continue
-        metadata = _suite_metadata(db, repo, path, payload, sha256)
+        source_ids = document_ids_by_filename(db, repo.id, snapshot)
+        metadata = _suite_metadata(source_ids, path, payload, sha256)
         if not metadata["ready"]:
             missing = "、".join(metadata["missing_sources"])
             raise ValueError(f"评测集 {suite_id} 缺少已索引来源：{missing}")
@@ -167,15 +174,7 @@ def load_eval_suite(
             if not question or not reference:
                 raise ValueError(f"评测集 {suite_id} 的 {case_id} 缺少 question 或 reference")
             source_file = str(item.get("source_file") or "").strip()
-            documents = _matching_documents(db, repo.id, source_file) if source_file else []
-            expected_source_ids = list(
-                dict.fromkeys(
-                    str(value)
-                    for document in documents
-                    for value in (document.id, document.source_id)
-                    if value
-                )
-            )
+            expected_source_ids = source_ids.get(Path(source_file).name.casefold(), [])
             cases.append(
                 RagEvalCase(
                     id=case_id,

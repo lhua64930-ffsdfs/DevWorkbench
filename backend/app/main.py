@@ -12,6 +12,7 @@ from app.api.routes import (
     ci,
     code_graph,
     conversations,
+    data_assets,
     evaluations,
     feedback,
     issues,
@@ -59,6 +60,8 @@ async def application_lifespan(app):
     verify_installed_patches()
     validate_production_settings()
     verify_schema(engine)
+    from app.services.evals.release_gate import verify_release_gate
+    verify_release_gate()
     tasks = []
     if settings.background_execution_mode == "embedded" and settings.app_env.lower() != "production":
         tasks.append(asyncio.create_task(job_worker_loop()))
@@ -108,6 +111,7 @@ def create_app() -> FastAPI:
     app.include_router(knowledge.router, prefix="/api/repos", tags=["knowledge"], dependencies=[Depends(authorize_api)])
     app.include_router(project_index.router, prefix="/api/repos", tags=["project_index"], dependencies=[Depends(authorize_api)])
     app.include_router(rag.router, prefix="/api/rag", tags=["rag"], dependencies=[Depends(authorize_api)])
+    app.include_router(data_assets.router, prefix="/api/data-assets", tags=["data-assets"], dependencies=[Depends(authorize_api)])
     app.include_router(code_graph.router, prefix="/api", tags=["code_graph"], dependencies=[Depends(authorize_api)])
     app.include_router(evaluations.router, prefix="/api/evals", tags=["evaluations"], dependencies=[Depends(authorize_api)])
     app.include_router(webhooks.router, prefix="/api/webhooks", tags=["webhooks"])

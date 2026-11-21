@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from app.services.evals.token_budget import model_async_client
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -20,6 +21,7 @@ from app.services.rag.embeddings import (
 from app.services.rag.rerank import rerank_documents
 from app.services.rag.retrieval import expand_parent_context, search_similar_documents
 from app.services.rag.source_policy import normalize_source_types, should_vectorize
+from app.services.rag.snapshots import selected_snapshot
 
 
 def as_uuid(value: str | uuid.UUID) -> uuid.UUID:
@@ -178,7 +180,7 @@ async def _qwen_rerank(
         )[:4000]
         for item in items
     ]
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with model_async_client(timeout=60) as client:
         response = await client.post(
             endpoint,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -231,7 +233,8 @@ async def retrieve_knowledge(
     metadata_filters: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
     started = time.perf_counter()
-    config = get_or_create_config(db, repo_id)
+    snapshot = selected_snapshot(db, repo_id)
+    config = KnowledgeBaseConfig(**snapshot.config) if snapshot else get_or_create_config(db, repo_id)
     resolved_top_k = min(max(top_k or config.top_k, 1), 20)
     method = retrieval_method or config.retrieval_method
     use_rerank = config.rerank_enabled if rerank_enabled is None else rerank_enabled
@@ -244,7 +247,7 @@ async def retrieve_knowledge(
         should_vectorize(source_type) for source_type in effective_source_types
     )
     query_embedding = None
-    if method in {"vector", "hybrid"} and has_vector_sources:
+    if method in {"vector", "hybrid"} and has_vector_sources and snapshot is None:
         query_embedding = embed_knowledge_query(
             query,
             provider=config.embedding_provider,
@@ -265,6 +268,7 @@ async def retrieve_knowledge(
         source_types=effective_source_types,
         metadata_filters=metadata_filters,
         pipeline_trace=pipeline_trace,
+        snapshot=snapshot,
     )
     rerank_stage: dict[str, Any] = {
         "name": "rerank",
@@ -297,7 +301,7 @@ async def retrieve_knowledge(
     items = items[:resolved_top_k]
     pipeline_trace.setdefault("stages", []).append({**rerank_stage, "output_count": len(items)})
 
-    items, parent_stage = expand_parent_context(db, repo_id, items, neighbor_window=1)
+    items, parent_stage = expand_parent_context(db, repo_id, items, neighbor_window=1, snapshot=snapshot)
     pipeline_trace["stages"].append(parent_stage)
 
     before_threshold = len(items)

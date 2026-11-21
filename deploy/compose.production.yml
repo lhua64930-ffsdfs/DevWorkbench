@@ -27,6 +27,9 @@ x-app: &app
     AI_GLOBAL_REQUESTS_PER_HOUR: ${AI_GLOBAL_REQUESTS_PER_HOUR:-300}
     MAX_DOCUMENT_CHUNKS: ${MAX_DOCUMENT_CHUNKS:-500}
     MAX_EVAL_CASES: ${MAX_EVAL_CASES:-20}
+    MAX_EVAL_TOKENS: ${MAX_EVAL_TOKENS:-1000000}
+    MAX_SNAPSHOT_CHUNKS: ${MAX_SNAPSHOT_CHUNKS:-2000}
+    MAX_KNOWLEDGE_SNAPSHOTS: ${MAX_KNOWLEDGE_SNAPSHOTS:-10}
     AI_CONCURRENT_REQUESTS: ${AI_CONCURRENT_REQUESTS:-2}
     CONTEXT_RESERVED_RESPONSE_TOKENS: ${CONTEXT_RESERVED_RESPONSE_TOKENS:-3000}
     CI_SANDBOX_ENABLED: 'false'
@@ -82,6 +85,10 @@ services:
     depends_on: {milvus: {condition: service_healthy}}
   api:
     <<: *app
+    environment:
+      <<: *environment
+      RELEASE_GATE_EVAL_ID: ${RELEASE_GATE_EVAL_ID:-}
+      RELEASE_GATE_REQUIRED: ${RELEASE_GATE_REQUIRED:-false}
     depends_on: {migrate: {condition: service_completed_successfully}, bootstrap-milvus: {condition: service_completed_successfully}}
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=8)"]

@@ -2,7 +2,7 @@
 from sqlalchemy import inspect, text
 from app.db.models import Base
 
-REVISION = "0003_enterprise"
+REVISION = "0005_quality_gates"
 
 
 def upgrade_schema(connection):
